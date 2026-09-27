@@ -1,4 +1,4 @@
-.PHONY: all build build-stub test clean run run-local run-local-2 run-standalone run-stub
+.PHONY: all build build-stub build-arm64 build-armhf build-pi test clean run run-local run-local-2 run-standalone run-stub
 
 BINARY_NAME=bin/orbit
 STUB_NAME=bin/nexus-stub
@@ -12,6 +12,16 @@ build:
 build-stub:
 	@mkdir -p bin
 	go build -o $(STUB_NAME) ./cmd/nexus-stub
+
+build-arm64:
+	@mkdir -p bin
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o bin/orbit-linux-arm64 ./cmd/orbit
+
+build-armhf:
+	@mkdir -p bin
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 go build -ldflags="-s -w" -o bin/orbit-linux-armhf ./cmd/orbit
+
+build-pi: build-arm64 build-armhf
 
 test:
 	go test -v ./...

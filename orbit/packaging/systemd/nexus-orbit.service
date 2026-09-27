@@ -1,0 +1,19 @@
+[Unit]
+Description=Nexus Orbit Companion Daemon
+After=network-online.target sound.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=%i
+ExecStart=/usr/local/bin/orbit --nexus-host %H.local --resolver invidious
+Restart=always
+RestartSec=5
+Environment=PULSE_SERVER=unix:/run/user/%U/pulse/native
+
+# Security & Sandboxing
+ProtectSystem=full
+ProtectHome=read-only
+
+[Install]
+WantedBy=default.target
