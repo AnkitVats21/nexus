@@ -1,4 +1,4 @@
-.PHONY: all build build-stub test clean run run-local run-standalone run-stub
+.PHONY: all build build-stub test clean run run-local run-local-2 run-standalone run-stub
 
 BINARY_NAME=bin/orbit
 STUB_NAME=bin/nexus-stub
@@ -21,6 +21,9 @@ run: build
 
 run-local: build
 	./$(BINARY_NAME) --nexus-host localhost
+
+run-local-2: build
+	./$(BINARY_NAME) --nexus-host localhost --satellite-id satellite-secondary --satellite-name "Secondary Satellite" --mpv-socket /tmp/orbit-sat2.sock
 
 run-standalone: build
 	./$(BINARY_NAME) --standalone
