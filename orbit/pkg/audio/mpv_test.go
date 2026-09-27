@@ -46,4 +46,9 @@ func TestMPVIPCIntegration(t *testing.T) {
 	if status.Volume != 85 {
 		t.Errorf("expected volume 85, got %d", status.Volume)
 	}
+
+	// Verify LoadURL with non-zero start position (such as satellite handoff)
+	if err := client.LoadURL("null://", 15000); err != nil {
+		t.Fatalf("failed to load URL with start position: %v", err)
+	}
 }

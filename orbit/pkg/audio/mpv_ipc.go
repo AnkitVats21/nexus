@@ -121,7 +121,7 @@ func (c *MPVIPCClient) LoadURL(url string, startPosMs int64) error {
 	var err error
 	if startPosMs > 0 {
 		startSecs := fmt.Sprintf("%.2f", float64(startPosMs)/1000.0)
-		_, err = c.sendCommand("loadfile", url, "replace", "start="+startSecs)
+		_, err = c.sendCommand("loadfile", url, "replace", -1, "start="+startSecs)
 	} else {
 		_, err = c.sendCommand("loadfile", url, "replace")
 	}
