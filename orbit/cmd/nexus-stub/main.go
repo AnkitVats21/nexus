@@ -62,27 +62,25 @@ type StubServer struct {
 	uiClientsMu sync.Mutex
 	uiClients   map[*websocket.Conn]struct{}
 
-	log *slog.Logger
+	autoPlay bool
+	log      *slog.Logger
 }
 
 func main() {
 	port := flag.Int("port", 8080, "HTTP/WS port for mock Nexus server & Web UI")
 	wsPath := flag.String("path", "/api/orbit/ws", "WebSocket endpoint path")
-	autoPlay := flag.Bool("autoplay", true, "Automatically play first queued song when satellite connects")
+	autoPlay := flag.Bool("autoplay", false, "Automatically play first queued song when satellite connects")
 	flag.Parse()
 
 	stub := &StubServer{
 		port:         *port,
 		wsPath:       *wsPath,
+		autoPlay:     *autoPlay,
 		log:          slog.Default().With("component", "nexus_stub"),
 		satellites:   make(map[string]*SatelliteSession),
 		uiClients:    make(map[*websocket.Conn]struct{}),
 		activeTarget: "nexus-local",
-		queue: []TrackItem{
-			{VideoID: "dQw4w9WgXcQ", Title: "Never Gonna Give You Up", Artist: "Rick Astley", Duration: 212},
-			{VideoID: "kJQP7kiw5Fk", Title: "Despacito", Artist: "Luis Fonsi", Duration: 282},
-			{VideoID: "9bZkp7q19f0", Title: "GANGNAM STYLE", Artist: "PSY", Duration: 252},
-		},
+		queue:        []TrackItem{},
 	}
 
 	// Register default simulated Nexus Core speaker
@@ -504,16 +502,18 @@ func (s *StubServer) handleSatelliteWS(w http.ResponseWriter, r *http.Request) {
 				s.log.Info("Satellite joined Constellation", "name", reg.Satellite.Name, "id", registeredID)
 				s.broadcastLog(fmt.Sprintf("Satellite online: %s (%s)", reg.Satellite.Name, registeredID))
 
-				// Auto-route first track if idle
-				s.queueMu.Lock()
-				if len(s.queue) > 0 && s.currentTrack == nil {
-					track := s.queue[0]
-					s.queue = s.queue[1:]
-					s.currentTrack = &track
-					s.queueMu.Unlock()
-					go s.routeToActive(track, 0)
-				} else {
-					s.queueMu.Unlock()
+				// Auto-route first track only if autoplay is enabled
+				if s.autoPlay {
+					s.queueMu.Lock()
+					if len(s.queue) > 0 && s.currentTrack == nil {
+						track := s.queue[0]
+						s.queue = s.queue[1:]
+						s.currentTrack = &track
+						s.queueMu.Unlock()
+						go s.routeToActive(track, 0)
+					} else {
+						s.queueMu.Unlock()
+					}
 				}
 
 				s.broadcastStateSnapshot()
