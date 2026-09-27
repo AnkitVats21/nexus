@@ -79,21 +79,8 @@ func main() {
 		log:          slog.Default().With("component", "nexus_stub"),
 		satellites:   make(map[string]*SatelliteSession),
 		uiClients:    make(map[*websocket.Conn]struct{}),
-		activeTarget: "nexus-local",
+		activeTarget: "",
 		queue:        []TrackItem{},
-	}
-
-	// Register default simulated Nexus Core speaker
-	stub.satellites["nexus-local"] = &SatelliteSession{
-		ID:           "nexus-local",
-		Name:         "Nexus Core (ESP32 Speaker)",
-		Type:         "speaker",
-		Online:       true,
-		Capabilities: []string{"audio_playback", "volume_control"},
-		Status: protocol.OrbitReportMsg{
-			State:  protocol.StateIdle,
-			Volume: 80,
-		},
 	}
 
 	mux := http.NewServeMux()
@@ -447,7 +434,7 @@ func (s *StubServer) handleSatelliteWS(w http.ResponseWriter, r *http.Request) {
 
 			// Failover if active satellite dropped
 			if s.activeTarget == registeredID {
-				fallback := "nexus-local"
+				fallback := ""
 				for id, sat := range s.satellites {
 					if sat.Online && id != registeredID {
 						fallback = id
@@ -455,7 +442,11 @@ func (s *StubServer) handleSatelliteWS(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 				s.activeTarget = fallback
-				s.broadcastLog(fmt.Sprintf("Active satellite disconnected. Failover target: %s", fallback))
+				if fallback != "" {
+					s.broadcastLog(fmt.Sprintf("Active satellite disconnected. Failover target: %s", fallback))
+				} else {
+					s.broadcastLog("All satellites disconnected. Active target: None")
+				}
 			}
 			s.fleetMu.Unlock()
 			s.broadcastStateSnapshot()
@@ -493,8 +484,8 @@ func (s *StubServer) handleSatelliteWS(w http.ResponseWriter, r *http.Request) {
 					},
 				}
 
-				// If active target is currently nexus-local or unset, adopt newly connected satellite
-				if s.activeTarget == "nexus-local" || s.activeTarget == "" {
+				// If active target is unset or offline, adopt newly connected satellite
+				if s.activeTarget == "" || !s.satellites[s.activeTarget].Online {
 					s.activeTarget = registeredID
 				}
 				s.fleetMu.Unlock()
