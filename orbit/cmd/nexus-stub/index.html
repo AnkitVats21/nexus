@@ -1,0 +1,709 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Nexus Orbit — Core Control Center</title>
+  <style>
+    :root {
+      --bg: #090d16;
+      --card-bg: rgba(22, 30, 46, 0.75);
+      --border: rgba(255, 255, 255, 0.08);
+      --accent: #38bdf8;
+      --accent-glow: rgba(56, 189, 248, 0.25);
+      --text: #f1f5f9;
+      --text-muted: #94a3b8;
+      --success: #10b981;
+      --danger: #ef4444;
+      --warning: #f59e0b;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    }
+
+    body {
+      background-color: var(--bg);
+      background-image: 
+        radial-gradient(at 0% 0%, rgba(56, 189, 248, 0.12) 0px, transparent 50%),
+        radial-gradient(at 100% 100%, rgba(99, 102, 241, 0.12) 0px, transparent 50%);
+      color: var(--text);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 24px 16px;
+    }
+
+    .container {
+      width: 100%;
+      max-width: 900px;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding-bottom: 8px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .brand h1 {
+      font-size: 1.4rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+    }
+
+    .brand span {
+      color: var(--accent);
+    }
+
+    .status-badge {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 14px;
+      border-radius: 9999px;
+      font-size: 0.85rem;
+      font-weight: 500;
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid var(--border);
+    }
+
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--danger);
+      box-shadow: 0 0 8px var(--danger);
+      transition: all 0.3s ease;
+    }
+
+    .dot.connected {
+      background: var(--success);
+      box-shadow: 0 0 10px var(--success);
+    }
+
+    .card {
+      background: var(--card-bg);
+      backdrop-filter: blur(16px);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 20px;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+    }
+
+    /* Player Section */
+    .player-card {
+      display: grid;
+      grid-template-columns: 140px 1fr;
+      gap: 24px;
+      align-items: center;
+    }
+
+    @media (max-width: 600px) {
+      .player-card {
+        grid-template-columns: 1fr;
+        text-align: center;
+      }
+    }
+
+    .thumb-wrap {
+      width: 140px;
+      height: 105px;
+      border-radius: 12px;
+      overflow: hidden;
+      background: #000;
+      box-shadow: 0 4px 15px rgba(0, 0, 0, 0.5);
+      border: 1px solid var(--border);
+      margin: 0 auto;
+    }
+
+    .thumb-wrap img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+
+    .track-details {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .track-title {
+      font-size: 1.25rem;
+      font-weight: 600;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .track-artist {
+      font-size: 0.95rem;
+      color: var(--text-muted);
+    }
+
+    .progress-bar-container {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .slider {
+      -webkit-appearance: none;
+      width: 100%;
+      height: 6px;
+      border-radius: 3px;
+      background: rgba(255, 255, 255, 0.15);
+      outline: none;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+
+    .slider::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: var(--accent);
+      cursor: pointer;
+      box-shadow: 0 0 6px var(--accent-glow);
+    }
+
+    .time-labels {
+      display: flex;
+      justify-content: space-between;
+      font-size: 0.75rem;
+      color: var(--text-muted);
+    }
+
+    .player-controls {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-top: 4px;
+    }
+
+    .btn-group {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    button {
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 8px 16px;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 0.9rem;
+      font-weight: 500;
+      transition: all 0.2s;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+    }
+
+    button:hover {
+      background: rgba(255, 255, 255, 0.15);
+      border-color: rgba(255, 255, 255, 0.2);
+    }
+
+    button.btn-primary {
+      background: var(--accent);
+      color: #04101e;
+      border-color: var(--accent);
+      font-weight: 600;
+    }
+
+    button.btn-primary:hover {
+      background: #7dd3fc;
+      box-shadow: 0 0 15px var(--accent-glow);
+    }
+
+    button.btn-circle {
+      width: 44px;
+      height: 44px;
+      border-radius: 50%;
+      padding: 0;
+    }
+
+    .volume-box {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      width: 140px;
+    }
+
+    /* Queue Section */
+    .section-title {
+      font-size: 1.1rem;
+      font-weight: 600;
+      margin-bottom: 12px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .queue-form {
+      display: flex;
+      gap: 10px;
+      margin-bottom: 14px;
+    }
+
+    input[type="text"] {
+      flex: 1;
+      background: rgba(0, 0, 0, 0.3);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 10px 14px;
+      border-radius: 8px;
+      font-size: 0.9rem;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+
+    input[type="text"]:focus {
+      border-color: var(--accent);
+    }
+
+    .presets {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-bottom: 16px;
+    }
+
+    .preset-pill {
+      font-size: 0.75rem;
+      padding: 4px 10px;
+      border-radius: 9999px;
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid var(--border);
+      color: var(--text-muted);
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .preset-pill:hover {
+      color: var(--accent);
+      border-color: var(--accent);
+      background: rgba(56, 189, 248, 0.08);
+    }
+
+    .queue-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      max-height: 260px;
+      overflow-y: auto;
+      padding-right: 4px;
+    }
+
+    .queue-item {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 10px 14px;
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid var(--border);
+      transition: all 0.2s;
+    }
+
+    .queue-item:hover {
+      background: rgba(255, 255, 255, 0.06);
+    }
+
+    .queue-thumb {
+      width: 48px;
+      height: 36px;
+      border-radius: 4px;
+      object-fit: cover;
+      background: #000;
+    }
+
+    .queue-info {
+      flex: 1;
+      min-width: 0;
+    }
+
+    .queue-name {
+      font-size: 0.9rem;
+      font-weight: 500;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .queue-meta {
+      font-size: 0.75rem;
+      color: var(--text-muted);
+    }
+
+    .empty-state {
+      text-align: center;
+      padding: 24px;
+      color: var(--text-muted);
+      font-size: 0.9rem;
+    }
+
+    /* Event Logs */
+    .log-container {
+      font-family: monospace;
+      font-size: 0.75rem;
+      background: rgba(0, 0, 0, 0.4);
+      border-radius: 8px;
+      padding: 12px;
+      height: 120px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      color: #cbd5e1;
+      border: 1px solid var(--border);
+    }
+
+    .log-line {
+      white-space: nowrap;
+    }
+
+    .log-time {
+      color: var(--text-muted);
+      margin-right: 6px;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="container">
+    <header>
+      <div class="brand">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#38bdf8" stroke-width="2">
+          <circle cx="12" cy="12" r="9"/>
+          <path d="M12 3a9 9 0 0 1 9 9"/>
+          <circle cx="12" cy="12" r="3" fill="#38bdf8"/>
+        </svg>
+        <h1>Nexus <span>Orbit</span> Control Center</h1>
+      </div>
+
+      <div class="status-badge">
+        <div class="dot" id="sat-dot"></div>
+        <span id="sat-status">Waiting for Satellite...</span>
+      </div>
+    </header>
+
+    <!-- Active Player Card -->
+    <div class="card player-card">
+      <div class="thumb-wrap">
+        <img id="track-thumb" src="https://img.youtube.com/vi/dQw4w9WgXcQ/hqdefault.jpg" alt="Thumbnail">
+      </div>
+
+      <div class="track-details">
+        <div>
+          <div class="track-title" id="track-title">No Track Active</div>
+          <div class="track-artist" id="track-artist">Orbit is idle</div>
+        </div>
+
+        <div class="progress-bar-container">
+          <input type="range" class="slider" id="seek-slider" min="0" max="100" value="0">
+          <div class="time-labels">
+            <span id="time-current">00:00</span>
+            <span id="time-total">00:00</span>
+          </div>
+        </div>
+
+        <div class="player-controls">
+          <div class="btn-group">
+            <button id="btn-prev" title="Previous">⏮</button>
+            <button class="btn-primary btn-circle" id="btn-play-pause" title="Play/Pause">▶</button>
+            <button id="btn-next" title="Next Track">⏭</button>
+          </div>
+
+          <div class="volume-box">
+            <span>🔊</span>
+            <input type="range" class="slider" id="vol-slider" min="0" max="100" value="100">
+            <span id="vol-text" style="font-size:0.75rem; width:30px;">100%</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Playlist & Queue Card -->
+    <div class="card">
+      <div class="section-title">
+        <span>Upcoming Queue</span>
+        <span id="queue-count" style="font-size:0.85rem; color:var(--text-muted);">0 tracks</span>
+      </div>
+
+      <div class="queue-form">
+        <input type="text" id="queue-input" placeholder="YouTube Video ID or Watch URL (e.g. dQw4w9WgXcQ)">
+        <button id="btn-add-queue">+ Add to Queue</button>
+        <button class="btn-primary" id="btn-play-now">⚡ Play Now</button>
+      </div>
+
+      <div class="presets">
+        <span style="font-size:0.75rem; color:var(--text-muted); align-self:center;">Presets:</span>
+        <div class="preset-pill" onclick="quickAdd('dQw4w9WgXcQ', 'Never Gonna Give You Up')">🎵 Rick Astley</div>
+        <div class="preset-pill" onclick="quickAdd('jfKfPfyJRdk', 'Lofi Hip Hop Radio')">☕ Lofi Beats</div>
+        <div class="preset-pill" onclick="quickAdd('kJQP7kiw5Fk', 'Despacito')">🌴 Despacito</div>
+        <div class="preset-pill" onclick="quickAdd('9bZkp7q19f0', 'Gangnam Style')">🕶️ Gangnam Style</div>
+        <div class="preset-pill" onclick="quickAdd('4xDzrJKXOOY', 'Synthwave Radio')">🌆 Synthwave</div>
+      </div>
+
+      <div class="queue-list" id="queue-list">
+        <div class="empty-state">Queue is empty. Add tracks above!</div>
+      </div>
+    </div>
+
+    <!-- Live Event Feed -->
+    <div class="card">
+      <div class="section-title" style="margin-bottom:8px;">Live Protocol Inspector</div>
+      <div class="log-container" id="log-feed">
+        <div class="log-line"><span class="log-time">[Init]</span> Connecting to Nexus WebSocket...</div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let ws = null;
+    let isSeeking = false;
+    let currentDurationMs = 0;
+    let currentState = "IDLE";
+
+    function connectUI() {
+      const loc = window.location;
+      const wsUrl = (loc.protocol === "https:" ? "wss://" : "ws://") + loc.host + "/api/stub/ui-ws";
+      ws = new WebSocket(wsUrl);
+
+      ws.onopen = () => {
+        addLog("Connected to Nexus Mock Core WS");
+      };
+
+      ws.onmessage = (evt) => {
+        const msg = JSON.parse(evt.data);
+        handleMessage(msg);
+      };
+
+      ws.onclose = () => {
+        addLog("Disconnected. Retrying in 2s...");
+        setTimeout(connectUI, 2000);
+      };
+    }
+
+    function sendAction(action, payload = {}) {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ action, ...payload }));
+      }
+    }
+
+    function handleMessage(msg) {
+      if (msg.type === "state_snapshot") {
+        updateSatellite(msg.satellite);
+        updateTrack(msg.current_track);
+        updateTelemetry(msg.player_status);
+        updateQueue(msg.queue);
+      } else if (msg.type === "telemetry") {
+        updateTelemetry(msg);
+      } else if (msg.type === "track_change") {
+        updateTrack(msg.track);
+        if (msg.queue) updateQueue(msg.queue);
+      } else if (msg.type === "queue_update") {
+        updateQueue(msg.queue);
+      } else if (msg.type === "satellite_status") {
+        updateSatellite(msg.satellite);
+      } else if (msg.type === "log") {
+        addLog(msg.text);
+      }
+    }
+
+    function updateSatellite(sat) {
+      const dot = document.getElementById("sat-dot");
+      const status = document.getElementById("sat-status");
+      if (sat && sat.id) {
+        dot.classList.add("connected");
+        status.textContent = `${sat.name} (${sat.id}) — Online`;
+      } else {
+        dot.classList.remove("connected");
+        status.textContent = "Waiting for Satellite...";
+      }
+    }
+
+    function updateTrack(track) {
+      const title = document.getElementById("track-title");
+      const artist = document.getElementById("track-artist");
+      const thumb = document.getElementById("track-thumb");
+
+      if (track && track.videoId) {
+        title.textContent = track.title || `YouTube Track (${track.videoId})`;
+        artist.textContent = track.artist || "Nexus Orbit";
+        thumb.src = `https://img.youtube.com/vi/${track.videoId}/hqdefault.jpg`;
+      } else {
+        title.textContent = "No Track Active";
+        artist.textContent = "Orbit is idle";
+      }
+    }
+
+    function updateTelemetry(st) {
+      if (!st) return;
+      currentState = st.state;
+
+      const playBtn = document.getElementById("btn-play-pause");
+      if (st.state === "PLAYING") {
+        playBtn.textContent = "⏸";
+      } else {
+        playBtn.textContent = "▶";
+      }
+
+      const cur = document.getElementById("time-current");
+      const tot = document.getElementById("time-total");
+      const slider = document.getElementById("seek-slider");
+
+      currentDurationMs = st.duration_ms || (st.duration ? st.duration * 1000 : 0);
+
+      const posSec = Math.floor((st.position_ms || 0) / 1000);
+      const durSec = Math.floor(currentDurationMs / 1000);
+
+      cur.textContent = formatTime(posSec);
+      tot.textContent = formatTime(durSec);
+
+      if (!isSeeking && currentDurationMs > 0) {
+        slider.value = Math.floor(((st.position_ms || 0) / currentDurationMs) * 100);
+      }
+
+      if (st.volume !== undefined) {
+        document.getElementById("vol-slider").value = st.volume;
+        document.getElementById("vol-text").textContent = st.volume + "%";
+      }
+    }
+
+    function updateQueue(queue) {
+      const container = document.getElementById("queue-list");
+      const count = document.getElementById("queue-count");
+      count.textContent = `${queue.length} track${queue.length === 1 ? '' : 's'}`;
+
+      if (!queue || queue.length === 0) {
+        container.innerHTML = '<div class="empty-state">Queue is empty. Add tracks above!</div>';
+        return;
+      }
+
+      container.innerHTML = queue.map((t, idx) => `
+        <div class="queue-item">
+          <img class="queue-thumb" src="https://img.youtube.com/vi/${t.videoId}/hqdefault.jpg">
+          <div class="queue-info">
+            <div class="queue-name">${t.title || t.videoId}</div>
+            <div class="queue-meta">${t.artist || 'YouTube'} • ${t.videoId}</div>
+          </div>
+          <button style="padding:4px 8px; font-size:0.8rem;" onclick="playNowIndex(${idx})">▶ Play</button>
+          <button style="padding:4px 8px; font-size:0.8rem; color:var(--danger);" onclick="removeQueueIndex(${idx})">✕</button>
+        </div>
+      `).join("");
+    }
+
+    function formatTime(secs) {
+      if (isNaN(secs) || secs < 0) secs = 0;
+      const m = Math.floor(secs / 60);
+      const s = Math.floor(secs % 60);
+      return `${m < 10 ? '0' : ''}${m}:${s < 10 ? '0' : ''}${s}`;
+    }
+
+    function parseVideoId(input) {
+      input = input.trim();
+      if (input.includes("youtube.com/watch?v=")) {
+        const url = new URL(input);
+        return url.searchParams.get("v") || input;
+      } else if (input.includes("youtu.be/")) {
+        const parts = input.split("youtu.be/");
+        return parts[1].split("?")[0] || input;
+      }
+      return input;
+    }
+
+    function addLog(text) {
+      const feed = document.getElementById("log-feed");
+      const line = document.createElement("div");
+      line.className = "log-line";
+      const now = new Date().toTimeString().split(" ")[0];
+      line.innerHTML = `<span class="log-time">[${now}]</span> ${text}`;
+      feed.appendChild(line);
+      feed.scrollTop = feed.scrollHeight;
+    }
+
+    // ── Controls Binding ───────────────────────────────────────────────────────
+    document.getElementById("btn-play-pause").addEventListener("click", () => {
+      if (currentState === "PLAYING") {
+        sendAction("pause");
+      } else {
+        sendAction("resume");
+      }
+    });
+
+    document.getElementById("btn-next").addEventListener("click", () => sendAction("next"));
+    document.getElementById("btn-prev").addEventListener("click", () => sendAction("prev"));
+
+    const seekSlider = document.getElementById("seek-slider");
+    seekSlider.addEventListener("mousedown", () => isSeeking = true);
+    seekSlider.addEventListener("mouseup", () => {
+      isSeeking = false;
+      if (currentDurationMs > 0) {
+        const targetMs = Math.floor((seekSlider.value / 100) * currentDurationMs);
+        sendAction("seek", { position_ms: targetMs });
+      }
+    });
+
+    const volSlider = document.getElementById("vol-slider");
+    volSlider.addEventListener("input", (e) => {
+      const vol = parseInt(e.target.value);
+      document.getElementById("vol-text").textContent = vol + "%";
+      sendAction("volume", { volume: vol });
+    });
+
+    document.getElementById("btn-add-queue").addEventListener("click", () => {
+      const input = document.getElementById("queue-input");
+      const vid = parseVideoId(input.value);
+      if (vid) {
+        sendAction("queue_add", { videoId: vid });
+        input.value = "";
+      }
+    });
+
+    document.getElementById("btn-play-now").addEventListener("click", () => {
+      const input = document.getElementById("queue-input");
+      const vid = parseVideoId(input.value);
+      if (vid) {
+        sendAction("play_now", { videoId: vid });
+        input.value = "";
+      }
+    });
+
+    function quickAdd(videoId, title) {
+      sendAction("queue_add", { videoId, title });
+    }
+
+    function playNowIndex(idx) {
+      sendAction("play_queue_index", { index: idx });
+    }
+
+    function removeQueueIndex(idx) {
+      sendAction("queue_remove", { index: idx });
+    }
+
+    connectUI();
+  </script>
+</body>
+</html>

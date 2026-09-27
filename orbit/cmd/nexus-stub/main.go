@@ -1,16 +1,14 @@
 package main
 
 import (
-	"bufio"
 	"context"
+	_ "embed"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
-	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -18,11 +16,23 @@ import (
 	"nexus-orbit/pkg/protocol"
 )
 
+//go:embed index.html
+var indexHTML []byte
+
 type TrackItem struct {
 	VideoID  string `json:"videoId"`
 	Title    string `json:"title"`
 	Artist   string `json:"artist"`
 	Duration int    `json:"duration"`
+}
+
+type UIActionMsg struct {
+	Action     string `json:"action"`
+	VideoID    string `json:"videoId,omitempty"`
+	Title      string `json:"title,omitempty"`
+	Index      int    `json:"index,omitempty"`
+	PositionMs int64  `json:"position_ms,omitempty"`
+	Volume     int    `json:"volume,omitempty"`
 }
 
 type StubServer struct {
@@ -35,30 +45,41 @@ type StubServer struct {
 	queueMu      sync.Mutex
 	queue        []TrackItem
 	currentTrack *TrackItem
+	playerStatus protocol.OrbitReportMsg
+
+	uiClientsMu sync.Mutex
+	uiClients   map[*websocket.Conn]struct{}
 
 	log *slog.Logger
 }
 
 func main() {
-	port := flag.Int("port", 8080, "HTTP/WS port for the mock Nexus server")
+	port := flag.Int("port", 8080, "HTTP/WS port for the mock Nexus server & Web UI")
 	wsPath := flag.String("path", "/api/orbit/ws", "WebSocket endpoint path")
 	autoPlay := flag.Bool("autoplay", true, "Automatically play first queued song when satellite connects")
 	flag.Parse()
 
 	stub := &StubServer{
-		port:   *port,
-		wsPath: *wsPath,
-		log:    slog.Default().With("component", "nexus_stub"),
+		port:      *port,
+		wsPath:    *wsPath,
+		log:       slog.Default().With("component", "nexus_stub"),
+		uiClients: make(map[*websocket.Conn]struct{}),
 		queue: []TrackItem{
 			{VideoID: "dQw4w9WgXcQ", Title: "Never Gonna Give You Up", Artist: "Rick Astley", Duration: 212},
 			{VideoID: "kJQP7kiw5Fk", Title: "Despacito", Artist: "Luis Fonsi", Duration: 282},
 			{VideoID: "9bZkp7q19f0", Title: "GANGNAM STYLE", Artist: "PSY", Duration: 252},
 		},
+		playerStatus: protocol.OrbitReportMsg{
+			State:  protocol.StateIdle,
+			Volume: 100,
+		},
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc(stub.wsPath, stub.handleWS)
-	mux.HandleFunc("/api/ws", stub.handleWS) // also listen on standard /api/ws
+	mux.HandleFunc("/", stub.handleWebUI)
+	mux.HandleFunc("/api/stub/ui-ws", stub.handleUIWebSocket)
+	mux.HandleFunc(stub.wsPath, stub.handleSatelliteWS)
+	mux.HandleFunc("/api/ws", stub.handleSatelliteWS)
 
 	server := &http.Server{
 		Addr:    fmt.Sprintf(":%d", stub.port),
@@ -66,31 +87,150 @@ func main() {
 	}
 
 	go func() {
-		stub.log.Info("📡 Nexus Core Mock Stub running",
-			"addr", fmt.Sprintf("http://localhost:%d%s", stub.port, stub.wsPath),
+		stub.log.Info("🌐 Nexus Orbit Web Dashboard & Stub Server live!",
+			"url", fmt.Sprintf("http://localhost:%d", stub.port),
+			"satelliteWS", fmt.Sprintf("ws://localhost:%d%s", stub.port, stub.wsPath),
 			"queuedTracks", len(stub.queue),
 		)
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			stub.log.Error("Stub server failed", "err", err)
+			stub.log.Error("Server stopped", "err", err)
 			os.Exit(1)
 		}
 	}()
 
-	// If autoplay is enabled, auto-route the first track when satellite connects
 	if *autoPlay {
-		stub.log.Info("Autoplay enabled: first track will be routed upon satellite registration")
+		stub.log.Info("Autoplay enabled: first track will route automatically upon satellite connection")
 	}
 
-	stub.printHelp()
-	stub.cliLoop()
+	fmt.Printf("\n✨ Open the Web Dashboard in your browser: http://localhost:%d\n\n", stub.port)
+
+	// Keep alive
+	select {}
 }
 
-func (s *StubServer) handleWS(w http.ResponseWriter, r *http.Request) {
+// ── Web UI Handlers ─────────────────────────────────────────────────────────
+
+func (s *StubServer) handleWebUI(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = w.Write(indexHTML)
+}
+
+func (s *StubServer) handleUIWebSocket(w http.ResponseWriter, r *http.Request) {
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 		InsecureSkipVerify: true,
 	})
 	if err != nil {
-		s.log.Error("WebSocket accept error", "err", err)
+		return
+	}
+	defer conn.Close(websocket.StatusNormalClosure, "")
+
+	s.uiClientsMu.Lock()
+	s.uiClients[conn] = struct{}{}
+	s.uiClientsMu.Unlock()
+
+	defer func() {
+		s.uiClientsMu.Lock()
+		delete(s.uiClients, conn)
+		s.uiClientsMu.Unlock()
+	}()
+
+	// Send initial snapshot
+	s.sendStateSnapshot(conn)
+
+	// Read actions from Web UI
+	for {
+		_, data, err := conn.Read(r.Context())
+		if err != nil {
+			return
+		}
+
+		var act UIActionMsg
+		if err := json.Unmarshal(data, &act); err == nil {
+			s.handleUIAction(act)
+		}
+	}
+}
+
+func (s *StubServer) handleUIAction(act UIActionMsg) {
+	s.log.Info("Web UI Action received", "action", act.Action, "videoId", act.VideoID)
+
+	switch act.Action {
+	case "play_now":
+		title := act.Title
+		if title == "" {
+			title = fmt.Sprintf("YouTube (%s)", act.VideoID)
+		}
+		track := TrackItem{VideoID: act.VideoID, Title: title}
+		s.queueMu.Lock()
+		s.currentTrack = &track
+		s.queueMu.Unlock()
+		s.sendRoute(track, 0)
+		s.broadcastStateSnapshot()
+
+	case "queue_add":
+		title := act.Title
+		if title == "" {
+			title = fmt.Sprintf("YouTube (%s)", act.VideoID)
+		}
+		s.queueMu.Lock()
+		s.queue = append(s.queue, TrackItem{VideoID: act.VideoID, Title: title})
+		s.queueMu.Unlock()
+		s.broadcastStateSnapshot()
+
+	case "queue_remove":
+		s.queueMu.Lock()
+		if act.Index >= 0 && act.Index < len(s.queue) {
+			s.queue = append(s.queue[:act.Index], s.queue[act.Index+1:]...)
+		}
+		s.queueMu.Unlock()
+		s.broadcastStateSnapshot()
+
+	case "play_queue_index":
+		s.queueMu.Lock()
+		if act.Index >= 0 && act.Index < len(s.queue) {
+			track := s.queue[act.Index]
+			s.queue = append(s.queue[:act.Index], s.queue[act.Index+1:]...)
+			s.currentTrack = &track
+			s.queueMu.Unlock()
+			s.sendRoute(track, 0)
+			s.broadcastStateSnapshot()
+		} else {
+			s.queueMu.Unlock()
+		}
+
+	case "next":
+		s.advanceQueue()
+
+	case "prev":
+		// Seek to start or previous
+		s.sendSatelliteCmd(protocol.OrbitSeekMsg{Cmd: "orbit_seek", PositionMs: 0})
+
+	case "pause":
+		s.sendSatelliteCmd(map[string]any{"cmd": "orbit_pause"})
+
+	case "resume":
+		s.sendSatelliteCmd(map[string]any{"cmd": "orbit_resume"})
+
+	case "seek":
+		s.sendSatelliteCmd(protocol.OrbitSeekMsg{Cmd: "orbit_seek", PositionMs: act.PositionMs})
+
+	case "volume":
+		s.sendSatelliteCmd(protocol.OrbitVolumeMsg{Cmd: "orbit_volume", Volume: act.Volume})
+	}
+}
+
+// ── Satellite WebSocket Handler ─────────────────────────────────────────────
+
+func (s *StubServer) handleSatelliteWS(w http.ResponseWriter, r *http.Request) {
+	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
+		InsecureSkipVerify: true,
+	})
+	if err != nil {
+		s.log.Error("Satellite WS accept error", "err", err)
 		return
 	}
 	defer conn.Close(websocket.StatusNormalClosure, "")
@@ -99,7 +239,7 @@ func (s *StubServer) handleWS(w http.ResponseWriter, r *http.Request) {
 	s.activeWS = conn
 	s.connMu.Unlock()
 
-	s.log.Info("Satellite connected to mock Nexus Core", "remote", r.RemoteAddr)
+	s.log.Info("Satellite connected", "remote", r.RemoteAddr)
 
 	defer func() {
 		s.connMu.Lock()
@@ -108,7 +248,8 @@ func (s *StubServer) handleWS(w http.ResponseWriter, r *http.Request) {
 			s.satellite = nil
 		}
 		s.connMu.Unlock()
-		s.log.Warn("Satellite disconnected from mock Nexus Core")
+		s.log.Warn("Satellite disconnected")
+		s.broadcastStateSnapshot()
 	}()
 
 	for {
@@ -117,11 +258,11 @@ func (s *StubServer) handleWS(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		s.handleInboundSatelliteMessage(data)
+		s.handleSatelliteMessage(data)
 	}
 }
 
-func (s *StubServer) handleInboundSatelliteMessage(data []byte) {
+func (s *StubServer) handleSatelliteMessage(data []byte) {
 	var base protocol.BaseMessage
 	if err := json.Unmarshal(data, &base); err != nil {
 		return
@@ -134,8 +275,9 @@ func (s *StubServer) handleInboundSatelliteMessage(data []byte) {
 			s.connMu.Lock()
 			s.satellite = &reg.Satellite
 			s.connMu.Unlock()
-			fmt.Printf("\n✨ [REGISTRATION] Satellite registered: %s (ID: %s, Type: %s)\n> ",
-				reg.Satellite.Name, reg.Satellite.ID, reg.Satellite.Type)
+
+			s.log.Info("Satellite registered", "name", reg.Satellite.Name, "id", reg.Satellite.ID)
+			s.broadcastLog(fmt.Sprintf("Satellite registered: %s (%s)", reg.Satellite.Name, reg.Satellite.ID))
 
 			// Auto-route first track if available
 			s.queueMu.Lock()
@@ -148,40 +290,50 @@ func (s *StubServer) handleInboundSatelliteMessage(data []byte) {
 			} else {
 				s.queueMu.Unlock()
 			}
+
+			s.broadcastStateSnapshot()
 		}
 
 	case "orbit_report":
 		var rep protocol.OrbitReportMsg
 		if err := json.Unmarshal(data, &rep); err == nil {
-			posSec := rep.PositionMs / 1000
-			durSec := rep.DurationMs / 1000
-			// Print compact telemetry
-			fmt.Printf("\r📊 [%s] %s | %02d:%02d / %02d:%02d | Vol: %d%%   ",
-				rep.State, rep.VideoID, posSec/60, posSec%60, durSec/60, durSec%60, rep.Volume)
+			s.queueMu.Lock()
+			s.playerStatus = rep
+			s.queueMu.Unlock()
+
+			s.broadcastJSON(map[string]any{
+				"type":        "telemetry",
+				"state":       rep.State,
+				"position_ms": rep.PositionMs,
+				"duration_ms": rep.DurationMs,
+				"volume":      rep.Volume,
+				"video_id":    rep.VideoID,
+			})
 		}
 
 	case "orbit_event":
 		var evt protocol.OrbitEventMsg
 		if err := json.Unmarshal(data, &evt); err == nil {
-			fmt.Printf("\n🔔 [EVENT] %s (videoId: %s, msg: %s)\n> ", evt.Event, evt.VideoID, evt.Message)
+			s.broadcastLog(fmt.Sprintf("Event: %s (videoId: %s)", evt.Event, evt.VideoID))
 		}
 
 	case "action":
 		var act protocol.NexusActionMsg
 		if err := json.Unmarshal(data, &act); err == nil {
-			fmt.Printf("\n🎮 [USER ACTION from Satellite] %s (value: %v)\n> ", act.Action, act.Value)
+			s.broadcastLog(fmt.Sprintf("Media Key Action: %s", act.Action))
 			if act.Action == "next" {
 				s.advanceQueue()
 			} else if act.Action == "toggle" {
-				// Toggle
-				s.sendCmd(map[string]any{"cmd": "orbit_pause"})
+				s.sendSatelliteCmd(map[string]any{"cmd": "orbit_pause"})
 			}
 		}
 	}
 }
 
 func (s *StubServer) sendRoute(track TrackItem, posMs int64) {
-	fmt.Printf("\n🚀 [NEXUS -> ORBIT] Routing track: %s (%s) at %d ms\n> ", track.Title, track.VideoID, posMs)
+	s.log.Info("Routing track to Satellite", "title", track.Title, "videoId", track.VideoID)
+	s.broadcastLog(fmt.Sprintf("Routing track: %s (%s)", track.Title, track.VideoID))
+
 	msg := protocol.OrbitRouteMsg{
 		Cmd:        "orbit_route",
 		VideoID:    track.VideoID,
@@ -190,14 +342,15 @@ func (s *StubServer) sendRoute(track TrackItem, posMs int64) {
 		Duration:   track.Duration,
 		PositionMs: posMs,
 	}
-	s.sendCmd(msg)
+	s.sendSatelliteCmd(msg)
+	s.broadcastStateSnapshot()
 }
 
 func (s *StubServer) advanceQueue() {
 	s.queueMu.Lock()
 	if len(s.queue) == 0 {
 		s.queueMu.Unlock()
-		fmt.Printf("\n📭 [QUEUE EMPTY] No more tracks in mock queue.\n> ")
+		s.broadcastLog("Queue reached end.")
 		return
 	}
 	next := s.queue[0]
@@ -208,13 +361,12 @@ func (s *StubServer) advanceQueue() {
 	s.sendRoute(next, 0)
 }
 
-func (s *StubServer) sendCmd(v any) {
+func (s *StubServer) sendSatelliteCmd(v any) {
 	s.connMu.Lock()
 	conn := s.activeWS
 	s.connMu.Unlock()
 
 	if conn == nil {
-		fmt.Println("⚠️ Cannot send command: no satellite connected!")
 		return
 	}
 
@@ -228,118 +380,76 @@ func (s *StubServer) sendCmd(v any) {
 	_ = conn.Write(ctx, websocket.MessageText, data)
 }
 
-func (s *StubServer) printHelp() {
-	fmt.Println(`
-Commands:
-  play <videoId> [title] - Immediately route and play videoId
-  queue <videoId> [title]- Add a track to the end of the queue
-  next                   - Pop and route the next track in queue
-  pause                  - Pause active playback
-  resume                 - Resume playback
-  seek <ms>              - Seek to position in milliseconds
-  vol <0-100>            - Set satellite volume
-  list                   - List tracks remaining in queue
-  help                   - Show this help
-  quit                   - Exit stub server
-`)
+// ── UI Broadcast Helpers ───────────────────────────────────────────────────
+
+func (s *StubServer) sendStateSnapshot(conn *websocket.Conn) {
+	s.connMu.Lock()
+	sat := s.satellite
+	s.connMu.Unlock()
+
+	s.queueMu.Lock()
+	cur := s.currentTrack
+	q := make([]TrackItem, len(s.queue))
+	copy(q, s.queue)
+	st := s.playerStatus
+	s.queueMu.Unlock()
+
+	payload := map[string]any{
+		"type":          "state_snapshot",
+		"satellite":     sat,
+		"current_track": cur,
+		"player_status": st,
+		"queue":         q,
+	}
+
+	data, _ := json.Marshal(payload)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = conn.Write(ctx, websocket.MessageText, data)
 }
 
-func (s *StubServer) cliLoop() {
-	scanner := bufio.NewScanner(os.Stdin)
-	for {
-		fmt.Print("> ")
-		if !scanner.Scan() {
-			break
-		}
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
-		}
+func (s *StubServer) broadcastStateSnapshot() {
+	s.connMu.Lock()
+	sat := s.satellite
+	s.connMu.Unlock()
 
-		parts := strings.Fields(line)
-		cmd := strings.ToLower(parts[0])
+	s.queueMu.Lock()
+	cur := s.currentTrack
+	q := make([]TrackItem, len(s.queue))
+	copy(q, s.queue)
+	st := s.playerStatus
+	s.queueMu.Unlock()
 
-		switch cmd {
-		case "play":
-			if len(parts) < 2 {
-				fmt.Println("Usage: play <videoId> [title]")
-				continue
-			}
-			title := "Direct Play"
-			if len(parts) >= 3 {
-				title = strings.Join(parts[2:], " ")
-			}
-			track := TrackItem{VideoID: parts[1], Title: title}
-			s.queueMu.Lock()
-			s.currentTrack = &track
-			s.queueMu.Unlock()
-			s.sendRoute(track, 0)
+	s.broadcastJSON(map[string]any{
+		"type":          "state_snapshot",
+		"satellite":     sat,
+		"current_track": cur,
+		"player_status": st,
+		"queue":         q,
+	})
+}
 
-		case "queue":
-			if len(parts) < 2 {
-				fmt.Println("Usage: queue <videoId> [title]")
-				continue
-			}
-			title := "Queued Track"
-			if len(parts) >= 3 {
-				title = strings.Join(parts[2:], " ")
-			}
-			s.queueMu.Lock()
-			s.queue = append(s.queue, TrackItem{VideoID: parts[1], Title: title})
-			qLen := len(s.queue)
-			s.queueMu.Unlock()
-			fmt.Printf("Added to queue. Queue length: %d\n", qLen)
+func (s *StubServer) broadcastLog(text string) {
+	s.broadcastJSON(map[string]any{
+		"type": "log",
+		"text": text,
+	})
+}
 
-		case "next":
-			s.advanceQueue()
+func (s *StubServer) broadcastJSON(v any) {
+	data, err := json.Marshal(v)
+	if err != nil {
+		return
+	}
 
-		case "pause":
-			s.sendCmd(map[string]any{"cmd": "orbit_pause"})
+	s.uiClientsMu.Lock()
+	defer s.uiClientsMu.Unlock()
 
-		case "resume":
-			s.sendCmd(map[string]any{"cmd": "orbit_resume"})
-
-		case "seek":
-			if len(parts) < 2 {
-				fmt.Println("Usage: seek <position_ms>")
-				continue
-			}
-			ms, err := strconv.ParseInt(parts[1], 10, 64)
-			if err != nil {
-				fmt.Println("Invalid ms value")
-				continue
-			}
-			s.sendCmd(protocol.OrbitSeekMsg{Cmd: "orbit_seek", PositionMs: ms})
-
-		case "vol", "volume":
-			if len(parts) < 2 {
-				fmt.Println("Usage: vol <0-100>")
-				continue
-			}
-			vol, err := strconv.Atoi(parts[1])
-			if err != nil {
-				fmt.Println("Invalid volume value")
-				continue
-			}
-			s.sendCmd(protocol.OrbitVolumeMsg{Cmd: "orbit_volume", Volume: vol})
-
-		case "list":
-			s.queueMu.Lock()
-			fmt.Printf("Upcoming Queue (%d tracks):\n", len(s.queue))
-			for i, t := range s.queue {
-				fmt.Printf("  %d. %s (%s)\n", i+1, t.Title, t.VideoID)
-			}
-			s.queueMu.Unlock()
-
-		case "help":
-			s.printHelp()
-
-		case "quit", "exit":
-			fmt.Println("Exiting...")
-			os.Exit(0)
-
-		default:
-			fmt.Printf("Unknown command %q. Type 'help' for options.\n", cmd)
-		}
+	for conn := range s.uiClients {
+		go func(c *websocket.Conn) {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			_ = c.Write(ctx, websocket.MessageText, data)
+		}(conn)
 	}
 }
