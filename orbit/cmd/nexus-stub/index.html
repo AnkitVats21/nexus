@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Nexus Orbit — Core Control Center</title>
+  <title>Nexus Orbit — Constellation Control Center</title>
   <style>
     :root {
       --bg: #090d16;
@@ -40,7 +40,7 @@
 
     .container {
       width: 100%;
-      max-width: 900px;
+      max-width: 920px;
       display: flex;
       flex-direction: column;
       gap: 20px;
@@ -69,7 +69,7 @@
       color: var(--accent);
     }
 
-    .status-badge {
+    .fleet-counter {
       display: flex;
       align-items: center;
       gap: 8px;
@@ -81,20 +81,6 @@
       border: 1px solid var(--border);
     }
 
-    .dot {
-      width: 8px;
-      height: 8px;
-      border-radius: 50%;
-      background: var(--danger);
-      box-shadow: 0 0 8px var(--danger);
-      transition: all 0.3s ease;
-    }
-
-    .dot.connected {
-      background: var(--success);
-      box-shadow: 0 0 10px var(--success);
-    }
-
     .card {
       background: var(--card-bg);
       backdrop-filter: blur(16px);
@@ -102,6 +88,110 @@
       border-radius: 16px;
       padding: 20px;
       box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+    }
+
+    .section-title {
+      font-size: 1.05rem;
+      font-weight: 600;
+      margin-bottom: 12px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    /* Constellation Fleet Grid */
+    .constellation-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+      gap: 12px;
+    }
+
+    .satellite-card {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 12px 14px;
+      border-radius: 12px;
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid var(--border);
+      cursor: pointer;
+      transition: all 0.25s ease;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .satellite-card:hover {
+      background: rgba(255, 255, 255, 0.06);
+      transform: translateY(-2px);
+    }
+
+    .satellite-card.active {
+      border-color: var(--accent);
+      background: rgba(56, 189, 248, 0.08);
+      box-shadow: 0 0 20px var(--accent-glow);
+    }
+
+    .satellite-icon {
+      font-size: 1.6rem;
+      width: 44px;
+      height: 44px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 10px;
+      background: rgba(255, 255, 255, 0.05);
+    }
+
+    .satellite-card.active .satellite-icon {
+      background: rgba(56, 189, 248, 0.15);
+    }
+
+    .satellite-info {
+      flex: 1;
+      min-width: 0;
+    }
+
+    .satellite-name {
+      font-size: 0.95rem;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .satellite-id {
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .satellite-status-pill {
+      font-size: 0.7rem;
+      padding: 2px 8px;
+      border-radius: 9999px;
+      margin-top: 4px;
+      display: inline-block;
+      font-weight: 500;
+    }
+
+    .pill-active {
+      background: rgba(56, 189, 248, 0.2);
+      color: var(--accent);
+    }
+
+    .pill-online {
+      background: rgba(16, 185, 129, 0.2);
+      color: var(--success);
+    }
+
+    .pill-offline {
+      background: rgba(239, 68, 68, 0.2);
+      color: var(--danger);
     }
 
     /* Player Section */
@@ -251,15 +341,6 @@
     }
 
     /* Queue Section */
-    .section-title {
-      font-size: 1.1rem;
-      font-weight: 600;
-      margin-bottom: 12px;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-    }
-
     .queue-form {
       display: flex;
       gap: 10px;
@@ -310,7 +391,7 @@
       display: flex;
       flex-direction: column;
       gap: 8px;
-      max-height: 260px;
+      max-height: 240px;
       overflow-y: auto;
       padding-right: 4px;
     }
@@ -399,14 +480,24 @@
           <path d="M12 3a9 9 0 0 1 9 9"/>
           <circle cx="12" cy="12" r="3" fill="#38bdf8"/>
         </svg>
-        <h1>Nexus <span>Orbit</span> Control Center</h1>
+        <h1>Nexus <span>Orbit</span> Constellation</h1>
       </div>
 
-      <div class="status-badge">
-        <div class="dot" id="sat-dot"></div>
-        <span id="sat-status">Waiting for Satellite...</span>
+      <div class="fleet-counter">
+        <span id="fleet-count">0 Satellites Online</span>
       </div>
     </header>
+
+    <!-- Constellation Fleet / Audio Target Switcher -->
+    <div class="card">
+      <div class="section-title">
+        <span>Constellation Fleet (Select Active Audio Target)</span>
+        <span id="active-target-label" style="font-size:0.85rem; color:var(--accent);">Active: None</span>
+      </div>
+      <div class="constellation-grid" id="constellation-grid">
+        <div class="empty-state">No satellites connected yet. Start an orbit daemon!</div>
+      </div>
+    </div>
 
     <!-- Active Player Card -->
     <div class="card player-card">
@@ -485,6 +576,7 @@
     let isSeeking = false;
     let currentDurationMs = 0;
     let currentState = "IDLE";
+    let activeTarget = "";
 
     function connectUI() {
       const loc = window.location;
@@ -492,7 +584,7 @@
       ws = new WebSocket(wsUrl);
 
       ws.onopen = () => {
-        addLog("Connected to Nexus Mock Core WS");
+        addLog("Connected to Nexus Constellation Mock Core");
       };
 
       ws.onmessage = (evt) => {
@@ -514,34 +606,89 @@
 
     function handleMessage(msg) {
       if (msg.type === "state_snapshot") {
-        updateSatellite(msg.satellite);
+        activeTarget = msg.active_target || "";
+        updateConstellation(msg.constellation, activeTarget);
         updateTrack(msg.current_track);
         updateTelemetry(msg.player_status);
         updateQueue(msg.queue);
       } else if (msg.type === "telemetry") {
         updateTelemetry(msg);
+      } else if (msg.type === "constellation_update") {
+        activeTarget = msg.active_target || "";
+        updateConstellation(msg.constellation, activeTarget);
       } else if (msg.type === "track_change") {
         updateTrack(msg.track);
         if (msg.queue) updateQueue(msg.queue);
       } else if (msg.type === "queue_update") {
         updateQueue(msg.queue);
-      } else if (msg.type === "satellite_status") {
-        updateSatellite(msg.satellite);
       } else if (msg.type === "log") {
         addLog(msg.text);
       }
     }
 
-    function updateSatellite(sat) {
-      const dot = document.getElementById("sat-dot");
-      const status = document.getElementById("sat-status");
-      if (sat && sat.id) {
-        dot.classList.add("connected");
-        status.textContent = `${sat.name} (${sat.id}) — Online`;
-      } else {
-        dot.classList.remove("connected");
-        status.textContent = "Waiting for Satellite...";
+    function updateConstellation(satellites, activeId) {
+      const grid = document.getElementById("constellation-grid");
+      const label = document.getElementById("active-target-label");
+      const counter = document.getElementById("fleet-count");
+
+      if (!satellites || satellites.length === 0) {
+        grid.innerHTML = '<div class="empty-state">No satellites connected. Start an orbit daemon!</div>';
+        label.textContent = "Active: None";
+        counter.textContent = "0 Satellites Online";
+        return;
       }
+
+      const onlineCount = satellites.filter(s => s.online).length;
+      counter.textContent = `${onlineCount} Satellite${onlineCount === 1 ? '' : 's'} Online`;
+
+      const activeSat = satellites.find(s => s.id === activeId);
+      if (activeSat) {
+        label.textContent = `Active: ${activeSat.name} (${activeSat.id})`;
+      } else {
+        label.textContent = `Active: None`;
+      }
+
+      grid.innerHTML = satellites.map(sat => {
+        const isActive = sat.id === activeId;
+        const icon = getSatelliteIcon(sat.type);
+        const statusClass = isActive ? "pill-active" : (sat.online ? "pill-online" : "pill-offline");
+        const statusText = isActive ? "Active Co-Player" : (sat.online ? "Standby" : "Offline");
+
+        return `
+          <div class="satellite-card ${isActive ? 'active' : ''}" onclick="switchTarget('${sat.id}')">
+            <div class="satellite-icon">${icon}</div>
+            <div class="satellite-info">
+              <div class="satellite-name">${sat.name}</div>
+              <div class="satellite-id">${sat.id}</div>
+              <div class="satellite-status-pill ${statusClass}">${statusText}</div>
+            </div>
+            ${isActive ? '<span style="color:var(--accent); font-size:1.2rem;">🔊</span>' : ''}
+          </div>
+        `;
+      }).join("");
+    }
+
+    function getSatelliteIcon(type) {
+      switch ((type || '').toLowerCase()) {
+        case 'sbc':
+        case 'raspberry_pi':
+          return '🍓';
+        case 'laptop':
+          return '💻';
+        case 'hardware':
+        case 'speaker':
+          return '🔊';
+        case 'mobile':
+          return '📱';
+        default:
+          return '🖥️';
+      }
+    }
+
+    function switchTarget(targetId) {
+      if (targetId === activeTarget) return;
+      addLog(`Requesting Orbital Transfer to: ${targetId}`);
+      sendAction("switch_target", { target_id: targetId });
     }
 
     function updateTrack(track) {
