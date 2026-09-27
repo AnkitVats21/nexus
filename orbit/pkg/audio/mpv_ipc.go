@@ -193,6 +193,20 @@ func (c *MPVIPCClient) SetVolume(vol int) error {
 	return err
 }
 
+func (c *MPVIPCClient) SetMediaTitle(title, artist string) error {
+	displayTitle := title
+	if artist != "" && title != "" {
+		displayTitle = fmt.Sprintf("%s - %s", artist, title)
+	} else if title == "" {
+		displayTitle = artist
+	}
+	if displayTitle == "" {
+		return nil
+	}
+	c.log.Debug("Setting mpv force-media-title", "title", displayTitle)
+	return c.setProperty("force-media-title", displayTitle)
+}
+
 func (c *MPVIPCClient) Stop() error {
 	c.log.Debug("Stopping mpv playback")
 	_, err := c.sendCommand("stop")

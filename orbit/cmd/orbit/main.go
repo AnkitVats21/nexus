@@ -13,7 +13,6 @@ import (
 	"nexus-orbit/config"
 	"nexus-orbit/pkg/audio"
 	"nexus-orbit/pkg/coordinator"
-	"nexus-orbit/pkg/desktop"
 	"nexus-orbit/pkg/resolver"
 	"nexus-orbit/pkg/transport"
 )
@@ -40,7 +39,7 @@ func main() {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 
-	// 1. Audio Engine & mpv Process
+	// 1. Audio Engine & mpv Process (mpv natively provides MPRIS to desktop)
 	var procMgr *audio.ProcessManager
 	if cfg.AutoSpawnMPV {
 		procMgr = audio.NewProcessManager(cfg.MPVPath, cfg.MPVSocket)
@@ -66,15 +65,7 @@ func main() {
 	}
 	slog.Info("Stream resolver initialized", "driver", res.Name())
 
-	// 3. Desktop MPRIS (Linux)
-	mprisMgr, err := desktop.NewMPRISManager()
-	if err != nil {
-		slog.Warn("Desktop MPRIS integration unavailable (continuing without D-Bus)", "err", err)
-	} else {
-		defer mprisMgr.Close()
-	}
-
-	// 4. Transport Link to Nexus Core
+	// 3. Transport Link to Nexus Core
 	var trans transport.Transport
 	if !cfg.Standalone {
 		wsTrans := transport.NewWebSocketTransport()
@@ -87,15 +78,15 @@ func main() {
 		slog.Info("Running in STANDALONE mode (Nexus Core connection disabled)")
 	}
 
-	// 5. State Coordinator
-	coord := coordinator.NewCoordinator(cfg, trans, res, playerClient, mprisMgr)
+	// 4. State Coordinator
+	coord := coordinator.NewCoordinator(cfg, trans, res, playerClient)
 	if err := coord.Start(); err != nil {
 		slog.Error("Failed to start coordinator", "err", err)
 		os.Exit(1)
 	}
 	defer coord.Stop()
 
-	// 6. Test playback if requested via CLI
+	// 5. Test playback if requested via CLI
 	if cfg.TestVideoID != "" {
 		slog.Info("CLI test playback requested", "videoId", cfg.TestVideoID)
 		go func() {

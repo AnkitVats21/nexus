@@ -60,6 +60,9 @@ func (m *mockPlayer) SetVolume(vol int) error {
 	m.status.Volume = vol
 	return nil
 }
+func (m *mockPlayer) SetMediaTitle(title, artist string) error {
+	return nil
+}
 func (m *mockPlayer) Stop() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -125,7 +128,7 @@ func TestCoordinatorRouting(t *testing.T) {
 	res := resolver.NewDirectResolver()
 	player := &mockPlayer{}
 
-	coord := NewCoordinator(cfg, trans, res, player, nil)
+	coord := NewCoordinator(cfg, trans, res, player)
 	if err := coord.Start(); err != nil {
 		t.Fatalf("failed to start coordinator: %v", err)
 	}

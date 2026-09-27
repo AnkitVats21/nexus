@@ -133,20 +133,20 @@ When Nexus Core routes audio playback to this Satellite:
   }
   ```
 
-### 3.5. Desktop Integration (`pkg/desktop`)
-* **Responsibility:** Native desktop OS hooks (Linux MPRIS via D-Bus).
-* **Linux MPRIS (`org.mpris.MediaPlayer2.nexus_orbit`):**
-  * Exposes currently playing track info (`xesam:title`, `xesam:artist`, `mpris:length`, `mpris:artUrl`) to desktop widgets (GNOME, KDE, Waybar, Polybar).
-  * Hooks into physical keyboard media keys:
-    * `Play` / `Pause` / `PlayPause` -> Optimistically toggles local playback and dispatches action to Nexus Core.
-    * `Next` / `Previous` -> Forwards skip command to Nexus Core queue.
-    * `Stop` -> Stops playback and informs Nexus Core.
+### 3.5. Desktop Integration via Native mpv MPRIS
+* **Responsibility:** Seamless desktop OS integration (Linux MPRIS & media keys).
+* **Native mpv MPRIS:**
+  * Headless `mpv` automatically exports `org.mpris.MediaPlayer2.mpv` on the user session D-Bus.
+  * When playing a track, `mpv` extracts and displays the title, artist, duration, and thumbnail (`mpris:artUrl`) to desktop widgets (GNOME, KDE, Waybar).
+  * Hardware media keys (Play/Pause, Seek, Volume) control `mpv` directly.
+  * `nexus-orbit` observes these property changes via its Unix domain socket JSON-IPC and immediately synchronizes playback state back to Nexus Core.
+  * Eliminates redundant D-Bus code and prevents duplicate player widgets on the desktop.
 
 ### 3.6. State Coordinator (`pkg/coordinator`)
-* **Responsibility:** Central controller orchestrating Transport, Resolver, Audio Player, and Desktop Integration.
+* **Responsibility:** Central controller orchestrating Transport, Resolver, and Audio Engine.
 * **Authority Model:**
   * **Nexus Core is Queue Authority:** All playlist progression, shuffle, repeat, and track sequencing remain on Nexus.
-  * **Optimistic Local Response:** Local MPRIS commands immediately update local player state for responsive UX while simultaneously notifying Nexus Core.
+  * **Reactive Local Synchronization:** Whenever local `mpv` state changes (e.g. user toggles play/pause via keyboard media keys), the coordinator updates local state and transmits telemetry back to Nexus Core.
 * **State Machine:**
   * `IDLE`: Connected, waiting for audio routing.
   * `RESOLVING`: Received `videoId`, resolving stream URL via selected driver.
@@ -171,9 +171,6 @@ nexus-orbit/
 │   │   └── mpv_process.go       # Managed mpv subprocess runner
 │   ├── coordinator/             # State machine & lifecycle management
 │   │   └── coordinator.go
-│   ├── desktop/                 # OS desktop integration (Linux MPRIS)
-│   │   ├── mpris.go             # MPRIS D-Bus server
-│   │   └── mpris_stub.go        # Non-Linux fallback
 │   ├── protocol/                # JSON message models & serialization
 │   │   ├── messages.go          # Inbound / outbound protocol envelopes
 │   │   └── events.go            # Event types

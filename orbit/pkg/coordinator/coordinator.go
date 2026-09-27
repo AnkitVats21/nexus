@@ -10,19 +10,17 @@ import (
 
 	"nexus-orbit/config"
 	"nexus-orbit/pkg/audio"
-	"nexus-orbit/pkg/desktop"
 	"nexus-orbit/pkg/protocol"
 	"nexus-orbit/pkg/resolver"
 	"nexus-orbit/pkg/transport"
 )
 
-// Coordinator orchestrates Transport, Resolver, Audio Engine, and MPRIS.
+// Coordinator orchestrates Transport, Resolver, and Audio Engine.
 type Coordinator struct {
 	cfg       *config.Config
 	transport transport.Transport
 	resolver  resolver.Resolver
 	player    audio.AudioPlayer
-	mpris     *desktop.MPRISManager
 	log       *slog.Logger
 
 	stateMu      sync.RWMutex
@@ -39,7 +37,6 @@ func NewCoordinator(
 	trans transport.Transport,
 	res resolver.Resolver,
 	player audio.AudioPlayer,
-	mpris *desktop.MPRISManager,
 ) *Coordinator {
 	ctx, cancel := context.WithCancel(context.Background())
 	c := &Coordinator{
@@ -47,7 +44,6 @@ func NewCoordinator(
 		transport:    trans,
 		resolver:     res,
 		player:       player,
-		mpris:        mpris,
 		log:          slog.Default().With("component", "coordinator"),
 		currentState: protocol.StateIdle,
 		ctx:          ctx,
@@ -76,9 +72,6 @@ func (c *Coordinator) Stop() {
 	c.cancel()
 	if c.player != nil {
 		_ = c.player.Stop()
-	}
-	if c.mpris != nil {
-		_ = c.mpris.Close()
 	}
 	if c.transport != nil {
 		_ = c.transport.Close()
@@ -114,19 +107,22 @@ func (c *Coordinator) PlayTrack(ctx context.Context, videoID string, startPosMs 
 		return fmt.Errorf("failed to load audio URL: %w", err)
 	}
 
+	// Update mpv media title so mpv's built-in MPRIS displays track details
+	if resolved.Title != "" || resolved.Artist != "" {
+		_ = c.player.SetMediaTitle(resolved.Title, resolved.Artist)
+	}
+
 	c.setLocalState(protocol.StatePlaying)
-	c.updateMPRIS("Playing")
 	return nil
 }
 
 // ── Private Handlers ─────────────────────────────────────────────────────────
 
 func (c *Coordinator) setupCallbacks() {
-	// MPV track ended callback
+	// MPV track ended callback (EOF reached)
 	c.player.OnTrackEnded(func() {
 		c.log.Info("Audio playback ended (EOF reached)")
 		c.setLocalState(protocol.StateIdle)
-		c.updateMPRIS("Stopped")
 
 		c.stateMu.RLock()
 		curID := ""
@@ -136,60 +132,15 @@ func (c *Coordinator) setupCallbacks() {
 		c.stateMu.RUnlock()
 
 		c.sendEvent("track_ended", curID, "")
-		c.sendAction("next", nil) // Prompt Nexus to advance queue
+		c.sendAction("next", nil) // Prompt Nexus Core to advance queue
 	})
 
-	// MPV status change callback
+	// MPV status change callback (e.g. keyboard media key toggled pause directly in mpv)
 	c.player.OnStatusChanged(func(status audio.PlayerStatus) {
 		c.setLocalState(status.State)
-		switch status.State {
-		case protocol.StatePlaying:
-			c.updateMPRIS("Playing")
-		case protocol.StatePaused:
-			c.updateMPRIS("Paused")
-		case protocol.StateStopped, protocol.StateIdle:
-			c.updateMPRIS("Stopped")
-		}
+		// Immediately emit updated telemetry to Nexus Core
+		c.emitTelemetryReport()
 	})
-
-	// MPRIS desktop media keys callbacks
-	if c.mpris != nil {
-		c.mpris.SetHandlers(
-			func() { // PlayPause
-				c.log.Debug("MPRIS PlayPause triggered")
-				status, _ := c.player.GetStatus()
-				if status.State == protocol.StatePlaying {
-					_ = c.player.Pause()
-				} else {
-					_ = c.player.Resume()
-				}
-				c.sendAction("toggle", nil)
-			},
-			func() { // Play
-				_ = c.player.Resume()
-				c.sendAction("resume", nil)
-			},
-			func() { // Pause
-				_ = c.player.Pause()
-				c.sendAction("pause", nil)
-			},
-			func() { // Next
-				c.sendAction("next", nil)
-			},
-			func() { // Previous
-				c.sendAction("previous", nil)
-			},
-			func() { // Stop
-				_ = c.player.Stop()
-				c.sendAction("stop", nil)
-			},
-			func(posUsec int64) { // Seek
-				posMs := posUsec / 1000
-				_ = c.player.Seek(posMs)
-				c.sendAction("seek", posMs/1000)
-			},
-		)
-	}
 }
 
 func (c *Coordinator) handleTransportConnected() {
@@ -364,37 +315,4 @@ func (c *Coordinator) setLocalState(st protocol.PlaybackState) {
 	c.stateMu.Lock()
 	c.currentState = st
 	c.stateMu.Unlock()
-}
-
-func (c *Coordinator) updateMPRIS(statusStr string) {
-	if c.mpris == nil {
-		return
-	}
-
-	c.stateMu.RLock()
-	track := c.currentTrack
-	c.stateMu.RUnlock()
-
-	status, _ := c.player.GetStatus()
-
-	meta := desktop.TrackMetadata{}
-	if track != nil {
-		meta.TrackID = track.VideoID
-		meta.Title = track.Title
-		if meta.Title == "" {
-			meta.Title = fmt.Sprintf("YouTube Track (%s)", track.VideoID)
-		}
-		meta.Artist = track.Artist
-		if meta.Artist == "" {
-			meta.Artist = "Nexus Orbit"
-		}
-		meta.ArtURL = track.ThumbnailURL
-		meta.DurationUsec = int64(track.DurationSecs) * 1_000_000
-		if meta.DurationUsec == 0 && status.DurationMs > 0 {
-			meta.DurationUsec = status.DurationMs * 1000
-		}
-	}
-
-	vol := float64(status.Volume) / 100.0
-	c.mpris.UpdateState(statusStr, meta, vol)
 }

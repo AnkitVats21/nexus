@@ -17,6 +17,7 @@ type AudioPlayer interface {
 	Resume() error
 	Seek(posMs int64) error
 	SetVolume(vol int) error
+	SetMediaTitle(title, artist string) error
 	Stop() error
 	GetStatus() (PlayerStatus, error)
 	OnTrackEnded(fn func())
