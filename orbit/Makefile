@@ -1,4 +1,4 @@
-.PHONY: all build build-stub test clean run run-standalone run-stub
+.PHONY: all build build-stub test clean run run-local run-standalone run-stub
 
 BINARY_NAME=bin/orbit
 STUB_NAME=bin/nexus-stub
@@ -18,6 +18,9 @@ test:
 
 run: build
 	./$(BINARY_NAME)
+
+run-local: build
+	./$(BINARY_NAME) --nexus-host localhost
 
 run-standalone: build
 	./$(BINARY_NAME) --standalone

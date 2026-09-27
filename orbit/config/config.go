@@ -36,8 +36,9 @@ func LoadConfig() (*Config, error) {
 
 	cfg := &Config{}
 
+	var portFlag int
 	flag.StringVar(&cfg.NexusHost, "nexus-host", getEnv("NEXUS_HOST", "nexus.local"), "Hostname or IP of Nexus Core")
-	flag.IntVar(&cfg.NexusPort, "nexus-port", getEnvInt("NEXUS_PORT", 80), "HTTP/WS port on Nexus Core")
+	flag.IntVar(&portFlag, "nexus-port", 0, "HTTP/WS port on Nexus Core (defaults to 8080 for localhost/stub, 80 for remote board)")
 	flag.StringVar(&cfg.WSPath, "ws-path", getEnv("NEXUS_WS_PATH", "/api/orbit/ws"), "WebSocket path on Nexus Core")
 	flag.StringVar(&cfg.SatelliteName, "satellite-name", getEnv("SATELLITE_NAME", hostname), "Human-readable satellite name")
 	flag.StringVar(&cfg.SatelliteID, "satellite-id", getEnv("SATELLITE_ID", fmt.Sprintf("satellite-%s", hostname)), "Unique satellite identifier")
@@ -51,6 +52,16 @@ func LoadConfig() (*Config, error) {
 	flag.StringVar(&cfg.LogLevel, "log-level", getEnv("LOG_LEVEL", "info"), "Logging level (debug, info, warn, error)")
 
 	flag.Parse()
+
+	if portFlag != 0 {
+		cfg.NexusPort = portFlag
+	} else if envPort := getEnvInt("NEXUS_PORT", 0); envPort != 0 {
+		cfg.NexusPort = envPort
+	} else if cfg.NexusHost == "localhost" || cfg.NexusHost == "127.0.0.1" || cfg.NexusHost == "::1" {
+		cfg.NexusPort = 8080
+	} else {
+		cfg.NexusPort = 80
+	}
 
 	return cfg, nil
 }
