@@ -50,9 +50,10 @@ type StubServer struct {
 	port   int
 	wsPath string
 
-	fleetMu      sync.RWMutex
-	satellites   map[string]*SatelliteSession
-	activeTarget string
+	fleetMu        sync.RWMutex
+	satellites     map[string]*SatelliteSession
+	activeTarget   string
+	lastKnownPosMs int64
 
 	queueMu      sync.Mutex
 	queue        []TrackItem
@@ -84,7 +85,7 @@ func main() {
 		},
 	}
 
-	// Register simulated default Nexus Core on-board speaker
+	// Register default simulated Nexus Core speaker
 	stub.satellites["nexus-local"] = &SatelliteSession{
 		ID:           "nexus-local",
 		Name:         "Nexus Core (ESP32 Speaker)",
@@ -193,7 +194,6 @@ func (s *StubServer) handleUIAction(act UIActionMsg) {
 		s.currentTrack = &track
 		s.queueMu.Unlock()
 		s.routeToActive(track, 0)
-		s.broadcastStateSnapshot()
 
 	case "queue_add":
 		title := act.Title
@@ -221,7 +221,6 @@ func (s *StubServer) handleUIAction(act UIActionMsg) {
 			s.currentTrack = &track
 			s.queueMu.Unlock()
 			s.routeToActive(track, 0)
-			s.broadcastStateSnapshot()
 		} else {
 			s.queueMu.Unlock()
 		}
@@ -233,16 +232,45 @@ func (s *StubServer) handleUIAction(act UIActionMsg) {
 		s.sendCmdToActive(protocol.OrbitSeekMsg{Cmd: "orbit_seek", PositionMs: 0})
 
 	case "pause":
+		s.fleetMu.Lock()
+		activeID := s.activeTarget
+		if sat, ok := s.satellites[activeID]; ok {
+			sat.Status.State = protocol.StatePaused
+		}
+		s.fleetMu.Unlock()
 		s.sendCmdToActive(map[string]any{"cmd": "orbit_pause"})
+		s.broadcastStateSnapshot()
 
 	case "resume":
+		s.fleetMu.Lock()
+		activeID := s.activeTarget
+		if sat, ok := s.satellites[activeID]; ok {
+			sat.Status.State = protocol.StatePlaying
+		}
+		s.fleetMu.Unlock()
 		s.sendCmdToActive(map[string]any{"cmd": "orbit_resume"})
+		s.broadcastStateSnapshot()
 
 	case "seek":
+		s.fleetMu.Lock()
+		s.lastKnownPosMs = act.PositionMs
+		activeID := s.activeTarget
+		if sat, ok := s.satellites[activeID]; ok {
+			sat.Status.PositionMs = act.PositionMs
+		}
+		s.fleetMu.Unlock()
 		s.sendCmdToActive(protocol.OrbitSeekMsg{Cmd: "orbit_seek", PositionMs: act.PositionMs})
+		s.broadcastStateSnapshot()
 
 	case "volume":
+		s.fleetMu.Lock()
+		activeID := s.activeTarget
+		if sat, ok := s.satellites[activeID]; ok {
+			sat.Status.Volume = act.Volume
+		}
+		s.fleetMu.Unlock()
 		s.sendCmdToActive(protocol.OrbitVolumeMsg{Cmd: "orbit_volume", Volume: act.Volume})
+		s.broadcastStateSnapshot()
 	}
 }
 
@@ -250,14 +278,15 @@ func (s *StubServer) handleUIAction(act UIActionMsg) {
 
 func (s *StubServer) performOrbitalTransfer(newTargetID string) {
 	s.fleetMu.Lock()
-	defer s.fleetMu.Unlock()
 
 	if newTargetID == s.activeTarget {
+		s.fleetMu.Unlock()
 		return
 	}
 
 	newSat, exists := s.satellites[newTargetID]
 	if !exists || !newSat.Online {
+		s.fleetMu.Unlock()
 		s.broadcastLog(fmt.Sprintf("Cannot switch to %s: target offline or unknown", newTargetID))
 		return
 	}
@@ -265,50 +294,80 @@ func (s *StubServer) performOrbitalTransfer(newTargetID string) {
 	oldTargetID := s.activeTarget
 	oldSat := s.satellites[oldTargetID]
 
-	var currentPosMs int64 = 0
-	if oldSat != nil && oldSat.Online && oldSat.WS != nil {
-		currentPosMs = oldSat.Status.PositionMs
-		s.log.Info("Pausing playback on old satellite for transfer", "oldTarget", oldTargetID, "posMs", currentPosMs)
-		// Pause old satellite
-		data, _ := json.Marshal(map[string]any{"cmd": "orbit_pause"})
-		_ = oldSat.WS.Write(context.Background(), websocket.MessageText, data)
+	// Determine transfer position
+	transferPosMs := s.lastKnownPosMs
+	if oldSat != nil && oldSat.Status.PositionMs > 0 {
+		transferPosMs = oldSat.Status.PositionMs
+		s.lastKnownPosMs = transferPosMs
 	}
 
-	s.activeTarget = newTargetID
-	s.broadcastLog(fmt.Sprintf("🔄 Orbital Transfer: %s ➡️ %s at %d ms", oldTargetID, newTargetID, currentPosMs))
+	// 1. Pause old satellite if active
+	if oldSat != nil {
+		oldSat.Status.State = protocol.StatePaused
+		if oldSat.WS != nil {
+			s.log.Info("Pausing playback on old satellite", "oldTarget", oldTargetID, "posMs", transferPosMs)
+			go s.sendWSCmd(oldSat.WS, map[string]any{"cmd": "orbit_pause"})
+		}
+	}
 
-	// Route current track to new target
+	// 2. Set new active target
+	s.activeTarget = newTargetID
+
+	// 3. Prepare route message if there is an active track
 	s.queueMu.Lock()
 	track := s.currentTrack
 	s.queueMu.Unlock()
 
-	if track != nil && newSat.WS != nil {
-		s.log.Info("Handoff: routing active track to new satellite", "newTarget", newTargetID, "videoId", track.VideoID, "posMs", currentPosMs)
-		msg := protocol.OrbitRouteMsg{
-			Cmd:        "orbit_route",
-			VideoID:    track.VideoID,
-			Title:      track.Title,
-			Artist:     track.Artist,
-			Duration:   track.Duration,
-			PositionMs: currentPosMs,
+	var routeMsg *protocol.OrbitRouteMsg
+	var newSatWS *websocket.Conn
+
+	if track != nil {
+		newSat.Status.State = protocol.StateBuffering
+		newSat.Status.PositionMs = transferPosMs
+		if newSat.WS != nil {
+			newSatWS = newSat.WS
+			routeMsg = &protocol.OrbitRouteMsg{
+				Cmd:        "orbit_route",
+				VideoID:    track.VideoID,
+				Title:      track.Title,
+				Artist:     track.Artist,
+				Duration:   track.Duration,
+				PositionMs: transferPosMs,
+			}
 		}
-		data, _ := json.Marshal(msg)
-		_ = newSat.WS.Write(context.Background(), websocket.MessageText, data)
+	}
+
+	// Unlock fleetMu BEFORE sending network command and broadcasting snapshot!
+	s.fleetMu.Unlock()
+
+	s.broadcastLog(fmt.Sprintf("🔄 Orbital Transfer: %s ➡️ %s at %d ms", oldTargetID, newTargetID, transferPosMs))
+
+	if routeMsg != nil && newSatWS != nil {
+		s.log.Info("Handoff: routing active track to new satellite", "newTarget", newTargetID, "videoId", routeMsg.VideoID, "posMs", transferPosMs)
+		go s.sendWSCmd(newSatWS, routeMsg)
 	}
 
 	s.broadcastStateSnapshot()
 }
 
 func (s *StubServer) routeToActive(track TrackItem, posMs int64) {
-	s.fleetMu.RLock()
+	s.fleetMu.Lock()
 	activeID := s.activeTarget
 	sat := s.satellites[activeID]
-	s.fleetMu.RUnlock()
+	s.lastKnownPosMs = posMs
+	var wsConn *websocket.Conn
+	if sat != nil {
+		sat.Status.State = protocol.StateBuffering
+		sat.Status.PositionMs = posMs
+		sat.Status.VideoID = track.VideoID
+		wsConn = sat.WS
+	}
+	s.fleetMu.Unlock()
 
 	s.log.Info("Routing track to active target", "target", activeID, "title", track.Title, "videoId", track.VideoID)
 	s.broadcastLog(fmt.Sprintf("Routing to [%s]: %s", activeID, track.Title))
 
-	if sat != nil && sat.WS != nil {
+	if wsConn != nil {
 		msg := protocol.OrbitRouteMsg{
 			Cmd:        "orbit_route",
 			VideoID:    track.VideoID,
@@ -317,8 +376,7 @@ func (s *StubServer) routeToActive(track TrackItem, posMs int64) {
 			Duration:   track.Duration,
 			PositionMs: posMs,
 		}
-		data, _ := json.Marshal(msg)
-		_ = sat.WS.Write(context.Background(), websocket.MessageText, data)
+		go s.sendWSCmd(wsConn, msg)
 	}
 	s.broadcastStateSnapshot()
 }
@@ -341,20 +399,28 @@ func (s *StubServer) advanceQueue() {
 func (s *StubServer) sendCmdToActive(v any) {
 	s.fleetMu.RLock()
 	sat := s.satellites[s.activeTarget]
+	var wsConn *websocket.Conn
+	if sat != nil {
+		wsConn = sat.WS
+	}
 	s.fleetMu.RUnlock()
 
-	if sat == nil || sat.WS == nil {
+	if wsConn != nil {
+		go s.sendWSCmd(wsConn, v)
+	}
+}
+
+func (s *StubServer) sendWSCmd(conn *websocket.Conn, v any) {
+	if conn == nil {
 		return
 	}
-
 	data, err := json.Marshal(v)
 	if err != nil {
 		return
 	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	_ = sat.WS.Write(ctx, websocket.MessageText, data)
+	_ = conn.Write(ctx, websocket.MessageText, data)
 }
 
 // ── Satellite WebSocket Handler ─────────────────────────────────────────────
@@ -381,7 +447,7 @@ func (s *StubServer) handleSatelliteWS(w http.ResponseWriter, r *http.Request) {
 			s.log.Warn("Satellite disconnected from Constellation", "id", registeredID)
 			s.broadcastLog(fmt.Sprintf("Satellite offline: %s", registeredID))
 
-			// If active target went offline, failover to another online satellite or nexus-local
+			// Failover if active satellite dropped
 			if s.activeTarget == registeredID {
 				fallback := "nexus-local"
 				for id, sat := range s.satellites {
@@ -429,7 +495,7 @@ func (s *StubServer) handleSatelliteWS(w http.ResponseWriter, r *http.Request) {
 					},
 				}
 
-				// If active target is currently nexus-local or unset, adopt this new satellite as active target!
+				// If active target is currently nexus-local or unset, adopt newly connected satellite
 				if s.activeTarget == "nexus-local" || s.activeTarget == "" {
 					s.activeTarget = registeredID
 				}
@@ -461,6 +527,9 @@ func (s *StubServer) handleSatelliteWS(w http.ResponseWriter, r *http.Request) {
 					sat.Status = rep
 				}
 				isActive := (registeredID == s.activeTarget)
+				if isActive && rep.PositionMs > 0 {
+					s.lastKnownPosMs = rep.PositionMs
+				}
 				s.fleetMu.Unlock()
 
 				// If report is from active satellite, broadcast telemetry to UI
