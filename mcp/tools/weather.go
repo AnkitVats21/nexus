@@ -95,11 +95,11 @@ type GeoLocation struct {
 
 // WeatherService handles geocoding and forecast queries.
 type WeatherService struct {
-	HTTPClient     *http.Client
-	GeocodingBase  string
-	ForecastBase   string
-	geoCache       map[string]GeoLocation
-	geoCacheMu     sync.RWMutex
+	HTTPClient    *http.Client
+	GeocodingBase string
+	ForecastBase  string
+	geoCache      map[string]GeoLocation
+	geoCacheMu    sync.RWMutex
 }
 
 // NewWeatherService returns a new WeatherService.

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -138,7 +139,10 @@ func (s *SearchService) Search(ctx context.Context, query string) (*SearchResult
 		Contents: []geminiReqContent{
 			{
 				Parts: []geminiReqPart{
-					{Text: trimmedQuery},
+					// Without the date the model answers "latest" questions
+					// from its training data (a 2024 Sensex close in 2026).
+					{Text: fmt.Sprintf("Today is %s. Search the web and answer briefly, for reading aloud: %s",
+						time.Now().Format("Monday, 2 January 2006"), trimmedQuery)},
 				},
 			},
 		},
@@ -152,17 +156,22 @@ func (s *SearchService) Search(ctx context.Context, query string) (*SearchResult
 		return nil, "", fmt.Errorf("failed to serialize search request: %w", err)
 	}
 
-	// Never print apiKey in logs or errors
-	reqURL := fmt.Sprintf("%s?key=%s", s.Endpoint, url.QueryEscape(apiKey))
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, bytes.NewReader(bodyBytes))
+	// The key goes in a header, never the URL: a *url.Error carries the full
+	// URL, and tool errors are returned to the device and the model.
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.Endpoint, bytes.NewReader(bodyBytes))
 	if err != nil {
-		return nil, "", fmt.Errorf("failed to construct search request: %w", err)
+		return nil, "", fmt.Errorf("failed to construct search request")
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-goog-api-key", apiKey)
 
 	resp, err := s.HTTPClient.Do(req)
 	if err != nil {
-		return nil, "", fmt.Errorf("search request failed: %w", err)
+		var uerr *url.Error
+		if errors.As(err, &uerr) {
+			err = uerr.Err // without the URL
+		}
+		return nil, "", fmt.Errorf("search request failed: %v", err)
 	}
 	defer resp.Body.Close()
 
