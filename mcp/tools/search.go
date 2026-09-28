@@ -46,7 +46,7 @@ type SearchService struct {
 // NewSearchService returns a new SearchService.
 func NewSearchService(client *http.Client, apiKey, keyFile string) *SearchService {
 	if client == nil {
-		client = &http.Client{Timeout: 8 * time.Second}
+		client = &http.Client{Timeout: 15 * time.Second}
 	}
 	return &SearchService{
 		HTTPClient: client,
@@ -96,9 +96,18 @@ type geminiReqTool struct {
 	GoogleSearch map[string]any `json:"google_search"`
 }
 
+type geminiThinkingConfig struct {
+	ThinkingBudget int `json:"thinkingBudget"`
+}
+
+type geminiGenerationConfig struct {
+	ThinkingConfig *geminiThinkingConfig `json:"thinkingConfig,omitempty"`
+}
+
 type geminiRequest struct {
-	Contents []geminiReqContent `json:"contents"`
-	Tools    []geminiReqTool    `json:"tools"`
+	Contents         []geminiReqContent      `json:"contents"`
+	Tools            []geminiReqTool         `json:"tools"`
+	GenerationConfig *geminiGenerationConfig `json:"generationConfig,omitempty"`
 }
 
 type geminiResponse struct {
@@ -149,6 +158,11 @@ func (s *SearchService) Search(ctx context.Context, query string) (*SearchResult
 		},
 		Tools: []geminiReqTool{
 			{GoogleSearch: map[string]any{}},
+		},
+		GenerationConfig: &geminiGenerationConfig{
+			ThinkingConfig: &geminiThinkingConfig{
+				ThinkingBudget: 0,
+			},
 		},
 	}
 
