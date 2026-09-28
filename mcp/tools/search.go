@@ -17,7 +17,8 @@ import (
 
 // WebSearchParams defines parameters for the web_search tool.
 type WebSearchParams struct {
-	Query string `json:"query" jsonschema:"The web search query"`
+	Query   string   `json:"query,omitempty" jsonschema:"The web search query"`
+	Queries []string `json:"queries,omitempty" jsonschema:"Optional search queries"`
 }
 
 // SearchSource represents a cited source.
@@ -255,14 +256,21 @@ func (s *SearchService) Search(ctx context.Context, query string) (*SearchResult
 // Handler returns an MCP tool handler for web_search.
 func (s *SearchService) Handler() func(ctx context.Context, req *mcp.CallToolRequest, params *WebSearchParams) (*mcp.CallToolResult, any, error) {
 	return func(ctx context.Context, req *mcp.CallToolRequest, params *WebSearchParams) (*mcp.CallToolResult, any, error) {
-		if params == nil || strings.TrimSpace(params.Query) == "" {
+		q := ""
+		if params != nil {
+			q = strings.TrimSpace(params.Query)
+			if q == "" && len(params.Queries) > 0 {
+				q = strings.TrimSpace(params.Queries[0])
+			}
+		}
+		if q == "" {
 			return &mcp.CallToolResult{
 				IsError: true,
 				Content: []mcp.Content{&mcp.TextContent{Text: "Search query is required"}},
 			}, nil, nil
 		}
 
-		res, voiceText, err := s.Search(ctx, params.Query)
+		res, voiceText, err := s.Search(ctx, q)
 		if err != nil {
 			return &mcp.CallToolResult{
 				IsError: true,
