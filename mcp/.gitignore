@@ -1,0 +1,4 @@
+/nexus-mcp
+/mcpcheck
+cmd/mcpcheck/mcpcheck
+*.exe
