@@ -93,7 +93,8 @@ func NewHTTPHandler(cfg ServerConfig) (http.Handler, *mcp.Server, error) {
 	streamableHandler := mcp.NewStreamableHTTPHandler(func(req *http.Request) *mcp.Server {
 		return mcpServer
 	}, &mcp.StreamableHTTPOptions{
-		JSONResponse: true, // Prefer application/json responses over text/event-stream
+		JSONResponse:               true, // Prefer application/json responses over text/event-stream
+		DisableLocalhostProtection: true, // Allow reverse proxies (Nginx, Caddy) forwarding domain Host header
 	})
 
 	mux := http.NewServeMux()

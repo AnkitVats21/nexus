@@ -2,3 +2,5 @@
 /mcpcheck
 cmd/mcpcheck/mcpcheck
 *.exe
+*.env
+.env
