@@ -257,6 +257,12 @@ phase 1 is the link and the dashboard, phase 2 voice sessions:
   fetched ahead. In a hub voice session the music tools (`play`,
   `playback`, `music_output`) run here. A proto 1 board (no roles) keeps
   its own music.
+- Music cache (`pkg/hub/cache.go`): every song the hub looks up a stream for
+  is saved (downloaded with a Range header, as the board does, or YouTube
+  throttles it). A saved song goes to any player as
+  `http://<hub>/hub/cache/<id>.webm`, the hub as that edge reached it: no
+  TLS on the board, no lookup, LAN speed. The board still keeps its card
+  copy.
 
 | Flag | Default | Description |
 |---|---|---|
@@ -271,6 +277,8 @@ phase 1 is the link and the dashboard, phase 2 voice sessions:
 | `--mcp-max-tools` | 32 | Most MCP tools offered to Gemini |
 | `--music` | `true` | Run the music for the edges (needs `--mcp-url` or `--invidious-url`) |
 | `--invidious-url` | `$NEXUS_INVIDIOUS_URL` | Invidious-compatible API (invidious-daemon) for music lookups, used after MCP fails |
+| `--cache-dir` | `~/.cache/nexus-hub/music` | Songs kept for the players, served at `/hub/cache/<id>.webm` |
+| `--cache-max-mb` | 2048 | Music cache size; the least recently played go first (0 = no cache) |
 
 `make run-hub` builds it and serves `../waveshare-dashboard/dist`;
 `make build-hub-pi` builds it for a 64-bit Pi.

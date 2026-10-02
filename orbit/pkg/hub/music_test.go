@@ -2,9 +2,13 @@ package hub
 
 import (
 	"context"
+	"io"
+	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -283,4 +287,95 @@ func TestMusicMovedDuringSession(t *testing.T) {
 	}
 	write(t, ctx, board.conn, map[string]any{"type": "voice_activity", "active": false})
 	orbit.next(ctx, "music_resume")
+}
+
+// cdnTracks: fakeTracks whose stream URLs are a real (test) server.
+type cdnTracks struct {
+	fakeTracks
+	cdn string
+}
+
+func (c *cdnTracks) Lookup(ctx context.Context, id, query string, stream bool, recs int) (TrackInfo, error) {
+	info, err := c.fakeTracks.Lookup(ctx, id, query, stream, recs)
+	if err == nil && info.URL != "" {
+		info.URL = c.cdn + "/" + info.ID
+	}
+	return info, err
+}
+
+func TestMusicCache(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	song := make([]byte, 100<<10)
+	for i := range song {
+		song[i] = byte(i)
+	}
+	var sawRange atomic.Bool
+	cdn := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawRange.Store(r.Header.Get("Range") == "bytes=0-")
+		w.Write(song)
+	}))
+	t.Cleanup(cdn.Close)
+	cache, err := NewMusicCache(t.TempDir(), 10<<20, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := New(Config{Version: "test", Tokens: []string{testToken}, Tracks: &cdnTracks{cdn: cdn.URL}, Cache: cache})
+	srv := httptest.NewServer(h.Handler())
+	t.Cleanup(srv.Close)
+	board := connectEdge(t, ctx, srv.URL, "board", boardRoles)
+
+	write(t, ctx, board.conn, map[string]any{"type": "music_action", "action": "play", "query": "alpha"})
+	if p := board.next(ctx, "music_play"); p["url"] != cdn.URL+"/a" {
+		t.Fatalf("first play: %v", p["url"])
+	}
+	for !cache.Has("a") {
+		if ctx.Err() != nil {
+			t.Fatal("a was never cached")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !sawRange.Load() {
+		t.Error("the download had no Range header (YouTube throttles without)")
+	}
+	// Played again: from the hub.
+	write(t, ctx, board.conn, map[string]any{"type": "music_action", "action": "play", "id": "a"})
+	p := board.next(ctx, "music_play")
+	want := srv.URL + CachePath + "a.webm"
+	if p["url"] != want {
+		t.Fatalf("second play: %v, want %s", p["url"], want)
+	}
+	req, _ := http.NewRequest("GET", want, nil)
+	req.Header.Set("Range", "bytes=1000-1999")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusPartialContent || len(body) != 1000 || body[0] != song[1000] {
+		t.Fatalf("range: %d, %d bytes", resp.StatusCode, len(body))
+	}
+	// Over the size: the least recently used goes.
+	small, _ := NewMusicCache(t.TempDir(), 250<<10, nil)
+	for _, id := range []string{"x1", "x2", "x3"} {
+		small.Fetch(id, cdn.URL+"/"+id)
+		for !small.Has(id) {
+			if ctx.Err() != nil {
+				t.Fatalf("%s was never cached", id)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		time.Sleep(20 * time.Millisecond)
+		if id == "x2" {
+			small.Has("x1") // used again: x2 is now the oldest
+		}
+	}
+	time.Sleep(20 * time.Millisecond)
+	if _, err := os.Stat(small.path("x2")); err == nil {
+		t.Error("x2 (least recently used) should have been evicted")
+	}
+	if !small.Has("x1") || !small.Has("x3") {
+		t.Error("x1 and x3 should be kept")
+	}
 }

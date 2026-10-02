@@ -224,8 +224,11 @@ func (m *Music) play(ctx context.Context, from *edge, id, query string, cached b
 	m.broadcastLocked()
 	m.mu.Unlock()
 
-	needURL := m.needsURL(out) && !(cached && out == from)
+	needURL := m.needsURL(out) && !(cached && out == from) && !m.h.cfg.Cache.Has(id)
 	info, err := m.src.Lookup(ctx, id, query, needURL, musicRecs)
+	if err == nil {
+		m.h.cfg.Cache.Fetch(info.ID, info.URL)
+	}
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -736,7 +739,7 @@ func (m *Music) startTrackLocked(out *edge, t Track) {
 func (m *Music) startAtLocked(out *edge, t Track, posMs int64, paused bool) {
 	m.gen++
 	url := ""
-	if m.needsURL(out) {
+	if m.needsURL(out) && !m.h.cfg.Cache.Has(t.ID) {
 		if u, ok := m.urls[t.ID]; ok && time.Since(u.at) < musicURLMaxAge {
 			url = u.url
 		} else {
@@ -766,6 +769,7 @@ func (m *Music) startAtLocked(out *edge, t Track, posMs int64, paused bool) {
 					m.nextLocked(true)
 					return
 				}
+				m.h.cfg.Cache.Fetch(t.ID, info.URL)
 				m.startLocked(t, info.URL, posMs, paused)
 				m.afterChangeLocked()
 			}()
@@ -792,6 +796,9 @@ func (m *Music) startLocked(t Track, url string, posMs int64, paused bool) {
 		m.state = "paused"
 	}
 	delete(m.urls, t.ID) // a URL is used once; renewals ask again
+	if m.h.cfg.Cache.Has(t.ID) {
+		url = m.h.cfg.Cache.URL(out.base, t.ID) // from the hub, over the LAN
+	}
 	msg := map[string]any{"type": "music_play", "track": t, "position_ms": posMs, "paused": paused, "seq": m.seq}
 	if url != "" {
 		msg["url"] = url
@@ -878,11 +885,11 @@ func (m *Music) addRecsLocked(recs []Track) {
 // one message to the player.
 func (m *Music) prefetchLocked() {
 	out := m.edgeLocked(m.output)
-	if out == nil || len(m.queue) == 0 || !m.needsURL(out) {
+	if out == nil || len(m.queue) == 0 || !(m.needsURL(out) || m.h.cfg.Cache != nil) {
 		return
 	}
 	id := m.queue[0].ID
-	if u, ok := m.urls[id]; (ok && time.Since(u.at) < musicURLMaxAge) || m.fetching[id] {
+	if u, ok := m.urls[id]; (ok && time.Since(u.at) < musicURLMaxAge) || m.fetching[id] || m.h.cfg.Cache.Has(id) {
 		return
 	}
 	m.fetching[id] = true
@@ -895,6 +902,7 @@ func (m *Music) prefetchLocked() {
 		delete(m.fetching, id)
 		if err == nil {
 			m.urls[id] = urlEntry{info.URL, time.Now()}
+			m.h.cfg.Cache.Fetch(id, info.URL)
 		}
 	}()
 }

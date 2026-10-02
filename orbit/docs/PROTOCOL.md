@@ -154,6 +154,9 @@ The hub owns the queue and picks the output: one player at a time.
   belong to, so the hub ignores a late `ended` from the track before.
 - A player that has the song saved (the board's card) plays it from there
   and ignores `url`.
+- `url` may be the hub's own copy, `http://<hub>/hub/cache/<id>.webm`
+  (plain HTTP on the LAN, Range requests for seeking), or a YouTube stream
+  URL. A player treats both the same.
 - Stream URLs are signed, bound to the home IP and expire (~6 h). Nobody
   logs them (log the host) or stores them.
 - No `url` and the player can't resolve: it sends `music_renew`.

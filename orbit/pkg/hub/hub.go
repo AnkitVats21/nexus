@@ -74,6 +74,8 @@ type Config struct {
 	VoiceLead time.Duration
 	// Where songs are looked up (nil = the hub doesn't run the music).
 	Tracks TrackSource
+	// Songs kept for the players (nil = none; they stream from YouTube).
+	Cache *MusicCache
 }
 
 type Hub struct {
@@ -103,6 +105,7 @@ type edge struct {
 	roles   edgeRoles
 	legacy  bool     // proto 1 hello (no roles): runs its own music
 	apiBase *url.URL // state role only
+	base    string   // the hub as this edge reached it: "http://host:port"
 	proxy   *httputil.ReverseProxy
 	since   time.Time
 	voiceQ  *voiceQueue
@@ -179,6 +182,9 @@ func (h *Hub) Handler() http.Handler {
 	mux.HandleFunc(EdgePath, h.serveEdge)
 	mux.HandleFunc(BoardPath, h.serveEdge)
 	mux.HandleFunc("/hub/status", h.serveStatus)
+	if h.cfg.Cache != nil {
+		mux.Handle(CachePath, h.cfg.Cache)
+	}
 	mux.HandleFunc("/api/ws", h.serveBrowser)
 	mux.HandleFunc("/api/", h.serveAPI)
 	mux.HandleFunc("/", h.serveWeb)
@@ -238,6 +244,7 @@ func (h *Hub) serveEdge(w http.ResponseWriter, r *http.Request) {
 		conn: conn, send: make(chan []byte, boardQueueLen), cancel: cancel,
 		id: hello.ID, name: hello.Name, kind: hello.Kind, fw: hello.FW, roles: *roles, legacy: hello.Roles == nil,
 		since: time.Now(), voiceQ: newVoiceQueue(conn, h.cfg.VoiceLead),
+		base: "http://" + r.Host,
 	}
 	if b.name == "" {
 		b.name = b.id

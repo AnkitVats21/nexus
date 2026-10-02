@@ -39,6 +39,8 @@ func main() {
 	music := flag.Bool("music", true, "run the music (queue, lookups, outputs) for the edges")
 	invidiousURL := flag.String("invidious-url", os.Getenv("NEXUS_INVIDIOUS_URL"),
 		"Invidious-compatible API (invidious-daemon) for music lookups, after MCP (default $NEXUS_INVIDIOUS_URL)")
+	cacheDir := flag.String("cache-dir", filepath.Join(home, ".cache", "nexus-hub", "music"), "songs kept for the players")
+	cacheMB := flag.Int("cache-max-mb", 2048, "music cache size (0 = no cache)")
 	debug := flag.Bool("debug", false, "debug logging")
 	flag.Parse()
 
@@ -88,8 +90,15 @@ func main() {
 			tracks = hub.NewInvidiousTracks(*invidiousURL)
 		}
 	}
+	var cache *hub.MusicCache
+	if tracks != nil && *cacheMB > 0 {
+		if cache, err = hub.NewMusicCache(*cacheDir, int64(*cacheMB)<<20, log); err != nil {
+			log.Warn("No music cache", "dir", *cacheDir, "err", err)
+			cache = nil
+		}
+	}
 	h := hub.New(hub.Config{Version: version, Tokens: tokens, WebDir: *webDir, Log: log,
-		GeminiKey: geminiKey, MCP: mcp, Tracks: tracks})
+		GeminiKey: geminiKey, MCP: mcp, Tracks: tracks, Cache: cache})
 	srv := &http.Server{Addr: *listen, Handler: h.Handler(), ReadHeaderTimeout: 10 * time.Second}
 
 	ln, err := net.Listen("tcp", *listen)
