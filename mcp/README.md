@@ -13,6 +13,9 @@ Hardware skills (volume, timers, alarms, display) remain in device firmware; dat
   1. `news_headlines`: Google News RSS (top stories, topics, search queries).
   2. `web_search`: Google-grounded search via Gemini 2.5 Flash (`generateContent`).
   3. `weather`: Open-Meteo current conditions and multi-day forecast with WMO weather codes and in-memory geocoding cache.
+- **Device-only tools** (marked `_meta: {"nexus/device_only": true}`; the device calls them itself and does not offer them to the voice model):
+  1. `music_search`: songs for a query (`tracks`: id, title, artist, duration).
+  2. `music_track`: one song by `id` or `query` (top result): details, the best Opus `stream_url`, and up to `recommendations` related songs. A video that is gone returns `error: "not_found"` (not a tool error), so the device skips it.
 - **Robustness**: 8-second outbound HTTP timeouts; returns protocol-level `isError` tool results instead of panicking.
 
 ## Environment Variables
@@ -23,6 +26,7 @@ Hardware skills (volume, timers, alarms, display) remain in device firmware; dat
 | `NEXUS_MCP_ADDR` | No | `0.0.0.0:8787` | Bind address and port for the HTTP server |
 | `GEMINI_API_KEY` | No | — | Google Gemini API key for `web_search` |
 | `GEMINI_API_KEY_FILE` | No | — | Path to a file containing the Gemini API key |
+| `NEXUS_MCP_MUSIC_API` | No | `https://stream.ankitm.xyz` | Invidious-compatible API (invidious-daemon) for the device's music lookups; its stream URLs must be resolved from the device's network |
 
 > **Security Note**: Never commit API keys or tokens into version control. `nexus-mcp` never logs or prints credentials.
 

@@ -161,10 +161,20 @@ func TestInProcessMCPClient(t *testing.T) {
 		toolNames[tool.Name] = true
 	}
 
-	expectedTools := []string{"news_headlines", "web_search", "weather"}
+	expectedTools := []string{"news_headlines", "web_search", "weather", "music_search", "music_track"}
 	for _, name := range expectedTools {
 		if !toolNames[name] {
 			t.Errorf("expected tool %q not found in tools/list", name)
+		}
+	}
+
+	// Only the device's own tools carry the marker that keeps them away
+	// from the voice model; a missing marker would put them in its prompt.
+	deviceOnly := map[string]bool{"music_search": true, "music_track": true}
+	for _, tool := range toolsResult.Tools {
+		marked := tool.Meta["nexus/device_only"] == true
+		if marked != deviceOnly[tool.Name] {
+			t.Errorf("tool %q: device_only marker %v, want %v", tool.Name, marked, deviceOnly[tool.Name])
 		}
 	}
 

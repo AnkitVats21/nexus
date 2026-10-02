@@ -17,6 +17,7 @@ type ServerConfig struct {
 	NewsService    *tools.NewsService
 	WeatherService *tools.WeatherService
 	SearchService  *tools.SearchService
+	MusicService   *tools.MusicService
 }
 
 // AuthMiddleware enforces Bearer token authentication using constant-time comparison.
@@ -58,6 +59,11 @@ func BuildMCPServer(cfg ServerConfig) (*mcp.Server, error) {
 		searchSvc = tools.NewSearchService(nil, "", "")
 	}
 
+	musicSvc := cfg.MusicService
+	if musicSvc == nil {
+		musicSvc = tools.NewMusicService(nil, "")
+	}
+
 	// 1. news_headlines
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "news_headlines",
@@ -75,6 +81,19 @@ func BuildMCPServer(cfg ServerConfig) (*mcp.Server, error) {
 		Name:        "weather",
 		Description: "Get current weather conditions and 1-7 day forecast for any location",
 	}, weatherSvc.Handler())
+
+	// Device-only tools: the device calls these itself; it does not offer
+	// them to the voice model (tools.DeviceOnlyMeta).
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "music_search",
+		Description: "Search YouTube for songs (device use)",
+		Meta:        tools.DeviceOnlyMeta,
+	}, musicSvc.SearchHandler())
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "music_track",
+		Description: "A song's details, audio stream URL and related songs, by video id or search query (device use)",
+		Meta:        tools.DeviceOnlyMeta,
+	}, musicSvc.TrackHandler())
 
 	return server, nil
 }

@@ -37,12 +37,21 @@ func main() {
 	weatherSvc := tools.NewWeatherService(httpClient)
 	searchSvc := tools.NewSearchService(httpClient, apiKey, keyFile)
 
+	// Invidious-compatible API for the device's music lookups.
+	musicURL := strings.TrimSpace(os.Getenv("NEXUS_MCP_MUSIC_API"))
+	if musicURL == "" {
+		musicURL = "https://stream.ankitm.xyz"
+	}
+	// Resolving a stream runs yt-dlp behind the API: 10 s measured cold.
+	musicSvc := tools.NewMusicService(&http.Client{Timeout: 25 * time.Second}, musicURL)
+
 	cfg := ServerConfig{
 		Token:          token,
 		Addr:           addr,
 		NewsService:    newsSvc,
 		WeatherService: weatherSvc,
 		SearchService:  searchSvc,
+		MusicService:   musicSvc,
 	}
 
 	handler, _, err := NewHTTPHandler(cfg)
