@@ -259,3 +259,28 @@ func TestMusicVoiceTool(t *testing.T) {
 		t.Fatalf("no play answer to Gemini: %v", inputs)
 	}
 }
+
+// The board pauses its own music for its own session; moved to the
+// satellite during the session, the music starts there held, and plays
+// when the session ends.
+func TestMusicMovedDuringSession(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	srv := newMusicHub(t, nil)
+	board := connectEdge(t, ctx, srv.URL, "board", boardRoles)
+	orbit := connectEdge(t, ctx, srv.URL, "workstation", orbitRoles)
+	write(t, ctx, board.conn, map[string]any{"type": "music_action", "action": "play", "query": "alpha"})
+	board.next(ctx, "music_play")
+	write(t, ctx, board.conn, map[string]any{"type": "music_report", "seq": 1, "id": "a", "state": "playing", "position_ms": 9000})
+	time.Sleep(30 * time.Millisecond)
+
+	write(t, ctx, board.conn, map[string]any{"type": "voice_activity", "active": true})
+	write(t, ctx, board.conn, map[string]any{"type": "music_report", "seq": 1, "id": "a", "state": "paused", "position_ms": 9500})
+	time.Sleep(30 * time.Millisecond)
+	write(t, ctx, board.conn, map[string]any{"type": "music_action", "action": "output", "target": "workstation"})
+	if p := orbit.next(ctx, "music_play"); p["paused"] != true {
+		t.Fatalf("satellite play during the session: %v", p)
+	}
+	write(t, ctx, board.conn, map[string]any{"type": "voice_activity", "active": false})
+	orbit.next(ctx, "music_resume")
+}

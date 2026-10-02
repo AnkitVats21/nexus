@@ -63,7 +63,11 @@ type Music struct {
 	refillPlay bool // ... and the queue ran out: play when it's done
 
 	sessions map[string]bool // edges with a voice session on
-	held     bool            // the output was paused for a session elsewhere
+	held     bool            // the hub holds the output paused for a session elsewhere
+	// The music was playing when the sessions began (and nobody paused it
+	// since): it plays again when they are over, wherever it is by then. A
+	// player that has the session pauses and resumes its own music.
+	sessionPaused bool
 }
 
 func newMusic(h *Hub, src TrackSource) *Music {
@@ -353,6 +357,7 @@ func (m *Music) control(what string) {
 	switch what {
 	case "pause":
 		m.held = false
+		m.sessionPaused = false
 		if out != nil {
 			m.sendLocked(out, map[string]any{"type": "music_pause"})
 			m.state = "paused"
@@ -377,6 +382,7 @@ func (m *Music) control(what string) {
 		}
 		if m.sessionElsewhereLocked() {
 			m.held = true // after the session
+			m.sessionPaused = true
 		} else {
 			m.sendLocked(out, map[string]any{"type": "music_resume"})
 			m.state = "playing"
@@ -392,6 +398,7 @@ func (m *Music) control(what string) {
 		m.cur = nil
 		m.state = "idle"
 		m.held = false
+		m.sessionPaused = false
 		if out != nil {
 			m.sendLocked(out, map[string]any{"type": "music_stop"})
 		}
@@ -457,9 +464,11 @@ func (m *Music) selectOutput(from *edge, target string) (string, error) {
 	if old != nil {
 		m.sendLocked(old, map[string]any{"type": "music_stop"})
 	}
-	paused := m.state == "paused" || m.sessionElsewhereLocked()
-	m.held = paused && m.state != "paused"
-	m.startAtLocked(to, *m.cur, m.posMs, paused)
+	// Paused by the person: stays paused. A session on another edge than
+	// the new output: held paused until it ends.
+	userPaused := m.state == "paused" && !m.sessionPaused
+	m.held = m.sessionElsewhereLocked() && !userPaused
+	m.startAtLocked(to, *m.cur, m.posMs, userPaused || m.held)
 	return to.name, nil
 }
 
@@ -577,28 +586,39 @@ func (m *Music) voiceActive(edgeID string, on bool) {
 }
 
 func (m *Music) voiceActiveLocked(edgeID string, on bool) {
+	if on == m.sessions[edgeID] {
+		return
+	}
+	first := on && len(m.sessions) == 0
 	if on {
 		m.sessions[edgeID] = true
 	} else {
 		delete(m.sessions, edgeID)
 	}
-	out := m.edgeLocked(m.output)
-	if out == nil {
-		return
+	playing := m.state == "playing" || m.state == "buffering" || m.state == "resolving"
+	if first && playing && m.cur != nil {
+		m.sessionPaused = true
 	}
-	// A player pauses its own music for its own session.
-	if on && edgeID != m.output && m.state == "playing" {
+	out := m.edgeLocked(m.output)
+	// A player pauses its own music for its own session; another's, the hub
+	// pauses.
+	if on && out != nil && edgeID != m.output && playing && !m.held {
 		m.sendLocked(out, map[string]any{"type": "music_pause"})
 		m.state = "paused"
 		m.held = true
 		m.broadcastLocked()
 	}
-	if !on && m.held && !m.sessionElsewhereLocked() {
-		m.held = false
+	if len(m.sessions) > 0 {
+		return
+	}
+	// All sessions are over.
+	if m.held && out != nil {
 		m.sendLocked(out, map[string]any{"type": "music_resume"})
 		m.state = "playing"
 		m.broadcastLocked()
 	}
+	m.held = false
+	m.sessionPaused = false
 }
 
 func (m *Music) sessionElsewhereLocked() bool {
