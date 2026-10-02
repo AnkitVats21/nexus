@@ -227,6 +227,9 @@ nexus-orbit/
 
 ## 7. nexus-hub (the board's hub)
 
+The hub's protocol, for every kind of device that connects to it (the ESP
+board, Orbit, later others), is `docs/PROTOCOL.md`.
+
 A second program in this repository: the waveshare board's hub on the LAN.
 The design is `docs/plans/hub-relay-design.md` in the waveshare repository;
 phase 1 is the link and the dashboard, phase 2 voice sessions:
