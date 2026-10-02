@@ -232,11 +232,15 @@ func (h *Hub) serveBoard(w http.ResponseWriter, r *http.Request) {
 			h.dropBoard(b, err)
 			return
 		}
+		t0 := time.Now()
 		switch {
 		case typ == websocket.MessageText:
 			h.fromBoard(b, data)
 		case len(data) > 2 && data[0] == chanMic:
 			b.voice.mic(data[2:])
+		}
+		if d := time.Since(t0); d > 300*time.Millisecond {
+			h.log.Warn("Board message took long to handle", "ms", d.Milliseconds(), "binary", typ == websocket.MessageBinary)
 		}
 	}
 }
@@ -246,7 +250,7 @@ func (h *Hub) fromBoard(b *board, data []byte) {
 		Type string `json:"type"`
 	}
 	if err := json.Unmarshal(data, &head); err != nil {
-		h.log.Warn("Unreadable board message", "bytes", len(data))
+		h.log.Warn("Unreadable board message", "bytes", len(data), "start", fmt.Sprintf("%q", data[:min(len(data), 48)]))
 		return
 	}
 	switch head.Type {

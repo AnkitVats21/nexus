@@ -79,6 +79,8 @@ type voiceSession struct {
 	forceResume   bool
 	searchRefused map[string]bool
 
+	micBytes int // this session's mic audio, logged at its end
+
 	pendingMic  [][]byte
 	pendingSize int
 	pendingText string
@@ -185,11 +187,16 @@ func (v *voiceSession) fromBoard(typ string, data []byte) {
 
 // mic is a channel 1 payload: 16 kHz PCM.
 func (v *voiceSession) mic(pcm []byte) {
+	t0 := time.Now()
 	v.mu.Lock()
+	if w := time.Since(t0); w > 200*time.Millisecond {
+		v.log.Warn("Mic waited for the session lock", "ms", w.Milliseconds())
+	}
 	defer v.mu.Unlock()
 	if !v.active || len(pcm) == 0 {
 		return
 	}
+	v.micBytes += len(pcm)
 	if v.gc == nil || !v.gc.ready {
 		buf := append([]byte(nil), pcm...)
 		v.pendingMic = append(v.pendingMic, buf)
@@ -241,6 +248,10 @@ func (v *voiceSession) startSession(m sessionStartMsg) {
 func (v *voiceSession) endLocked(keep bool) {
 	wasActive := v.active
 	v.active = false
+	if wasActive {
+		v.log.Info("Voice session ended", "mic_ms", v.micBytes/32)
+	}
+	v.micBytes = 0
 	v.pendingMic, v.pendingSize, v.pendingText = nil, 0, ""
 	if v.b != nil {
 		v.b.voiceQ.flush()
@@ -627,8 +638,12 @@ func (v *voiceSession) writeGeminiLocked(msg any) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), writeTimeout)
 	defer cancel()
+	t0 := time.Now()
 	if err := gc.ws.Write(ctx, websocket.MessageText, mustJSON(msg)); err != nil {
 		v.log.Warn("Write to Gemini failed", "err", err)
+	}
+	if w := time.Since(t0); w > 200*time.Millisecond {
+		v.log.Warn("Slow write to Gemini", "ms", w.Milliseconds())
 	}
 }
 
