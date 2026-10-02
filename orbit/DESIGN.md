@@ -19,6 +19,7 @@ When Nexus Core routes audio playback to this Satellite:
 5. Desktop controls (Linux MPRIS, hardware media keys) integrate seamlessly so physical keyboard keys control playback across the entire system.
 
 ### Key Design Tenets
+* **Firmware side:** `OrbitChannel` in the waveshare firmware (`main/services/http/OrbitChannel.h`) serves `/api/orbit/ws` (up to 3 satellites). A satellite silent for 5 s is dropped and the song continues on the board. The output is chosen with `POST /api/orbit/target`, `{"cmd":"orbit_set_target"}` on `/api/ws`, or by voice (Gemini's `music_output`).
 * **Firmware-Decoupled Transport:** Because firmware development on Waveshare is evolving independently (and current firmware has a single-client limitation on `/api/ws`), the transport layer is abstracted. It can connect to `/api/orbit/ws`, `/api/ws`, or run in standalone test mode.
 * **Pluggable Resolver:** PC users can resolve YouTube streams directly through `mpv`'s local `yt-dlp` integration with zero external infrastructure dependencies. Raspberry Pi users can resolve via `stream.ankitm.xyz` (`invidious-daemon`) to avoid 100% CPU spikes during Python extraction.
 * **Lean Client Architecture:** Unlike legacy relay prototypes, `nexus-orbit` has no local SQLite database, no local queue authority, no MQTT broker requirement, and no disk recording. Nexus Core is the authoritative queue and state master.
@@ -78,7 +79,7 @@ When Nexus Core routes audio playback to this Satellite:
 * **Responsibility:** Serializes/deserializes command envelopes exchanged with Nexus Core.
 * **Inbound Commands (from Nexus Core):**
   * `orbit_route`: Directs active playback to this Satellite with `videoId`, `title`, `artist`, `duration`, and `position_ms`.
-  * `orbit_play`: Start playing a specific track.
+  * `orbit_play`: Start playing a specific track at `position_ms` (0 if absent). Nexus Core sends this for every track change and handoff; a pause sent while it resolves is applied once it loads.
   * `orbit_pause`: Pause playback.
   * `orbit_resume`: Resume playback.
   * `orbit_seek`: Seek to a specific `position_ms`.
@@ -87,8 +88,8 @@ When Nexus Core routes audio playback to this Satellite:
 * **Outbound Events (to Nexus Core):**
   * `satellite_register`: Announces satellite identity, hostname, and capabilities upon connect.
   * `orbit_report`: Emits playback telemetry (`position_ms`, `state`, `volume`) periodically (every 1 second).
-  * `orbit_event`: Reports lifecycle events (`track_ended`, `buffering`, `error`).
-  * `orbit_action`: Forwards local user intent from MPRIS media keys (e.g. `play`, `pause`, `next`, `prev`).
+  * `orbit_event`: Reports lifecycle events: `track_ended` (played to the end; Nexus Core then sends the next track, so the satellite does not also ask for `next`) and `error` (Nexus Core skips the track). A stopped or replaced track is not an end.
+  * `action`: Forwards local user intent (e.g. `play`, `pause`, `next`, `prev`); Nexus Core accepts it from the active satellite only.
 
 ### 3.3. Pluggable Stream Resolver (`pkg/resolver`)
 * **Responsibility:** Resolves YouTube `videoId` into a playable URL and track metadata.
