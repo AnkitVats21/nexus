@@ -163,13 +163,16 @@ When Nexus Core routes audio playback to this Satellite:
 ```
 nexus-orbit/
 ├── cmd/
-│   └── orbit/
-│       └── main.go              # CLI entry point, flag parsing & signal handling
+│   ├── orbit/
+│   │   └── main.go              # CLI entry point, flag parsing & signal handling
+│   └── nexus-hub/
+│       └── main.go              # The board's hub (section 7)
 ├── pkg/
 │   ├── audio/                   # mpv process manager & Unix socket IPC client
 │   │   ├── player.go            # AudioPlayer interface & data types
 │   │   ├── mpv_ipc.go           # Low-level JSON-IPC client
 │   │   └── mpv_process.go       # Managed mpv subprocess runner
+│   ├── hub/                     # The board's hub: board link, browser fan-out, API proxy
 │   ├── coordinator/             # State machine & lifecycle management
 │   │   └── coordinator.go
 │   ├── protocol/                # JSON message models & serialization
@@ -208,6 +211,8 @@ nexus-orbit/
 
 ---
 
+---
+
 ## 6. Implementation Plan
 
 1. **Step 1 — Foundation:** Initialize `go.mod`, implement `config/` and `pkg/protocol/`.
@@ -217,3 +222,31 @@ nexus-orbit/
 5. **Step 5 — State Coordinator (`pkg/coordinator/`):** Connect Transport, Resolver, and Audio Engine with state reporting.
 6. **Step 6 — Linux MPRIS Integration (`pkg/desktop/`):** Implement D-Bus MPRIS controls and media key bindings.
 7. **Step 7 — CLI & Verification:** Assemble `cmd/orbit/main.go`, verify standalone playback with a test YouTube track, and test end-to-end.
+
+---
+
+## 7. nexus-hub (the board's hub)
+
+A second program in this repository: the waveshare board's hub on the LAN.
+The design is `docs/plans/hub-relay-design.md` in the waveshare repository;
+phase 1 (built) is the link and the dashboard:
+
+- `/hub/board`: the board connects here (`HubLink` on the board). `hello`
+  with a token from the token file, `welcome`, then the board's state pushes
+  and transcript come up and browser commands go down.
+- `/api/ws`: any number of browsers get the board's state and send commands
+  (the board's own `/api/ws` takes one client).
+- `/api/*`: forwarded to the board's HTTP server.
+- Everything else: the dashboard (`--web`, its device build).
+- Advertised over mDNS as `_nexus-hub._tcp` on LAN interfaces.
+
+| Flag | Default | Description |
+|---|---|---|
+| `--listen` | `:8380` | Address to listen on |
+| `--token-file` | `~/.config/nexus/hub_tokens` | Board tokens, one per line (mode 600). The board gets the same token with `POST /api/hub {"token": ...}` |
+| `--web` | none | Dashboard build folder (`waveshare-dashboard`: `npx vite build --mode device`, then `dist`) |
+| `--mdns` | `true` | Advertise `_nexus-hub._tcp` |
+| `--mdns-iface` | LAN interfaces | Interfaces to advertise on, comma-separated |
+
+`make run-hub` builds it and serves `../waveshare-dashboard/dist`;
+`make build-hub-pi` builds it for a 64-bit Pi.
