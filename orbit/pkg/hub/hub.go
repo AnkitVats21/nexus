@@ -2,7 +2,7 @@
 // board connects to it, and it serves the dashboard to any number of
 // browsers. See docs/plans/hub-relay-design.md in the waveshare repository.
 //
-// Phase 1: the link and the dashboard.
+// Phase 1: the link and the dashboard. Phase 2: voice sessions (voice.go).
 //   - /hub/board: the board's WebSocket. hello (token) -> welcome; then
 //     state pushes (JSON without "type", the same as the board's /api/ws)
 //     and transcript messages come up, and browser commands go down.
@@ -59,6 +59,15 @@ type Config struct {
 	// The dashboard build to serve ("" = none).
 	WebDir string
 	Log    *slog.Logger
+
+	// Voice: the Gemini API key ("" = no voice through the hub) and the Live
+	// endpoint (DefaultGeminiURL; tests use a fake).
+	GeminiKey string
+	GeminiURL string
+	// Remote tools for voice sessions (nil = none).
+	MCP *MCPClient
+	// How far ahead of playback the reply is sent (defaultVoiceLead).
+	VoiceLead time.Duration
 }
 
 type Hub struct {
@@ -71,6 +80,7 @@ type Hub struct {
 	browsers  map[*browser]struct{}
 
 	transcript *Transcript
+	voices     map[string]*voiceSession // by board id
 }
 
 type board struct {
@@ -83,6 +93,8 @@ type board struct {
 	apiBase *url.URL
 	proxy   *httputil.ReverseProxy
 	since   time.Time
+	voiceQ  *voiceQueue
+	voice   *voiceSession
 }
 
 type browser struct {
@@ -106,11 +118,18 @@ func New(cfg Config) *Hub {
 	if cfg.Log == nil {
 		cfg.Log = slog.Default()
 	}
+	if cfg.GeminiURL == "" {
+		cfg.GeminiURL = DefaultGeminiURL
+	}
+	if cfg.VoiceLead <= 0 {
+		cfg.VoiceLead = defaultVoiceLead
+	}
 	return &Hub{
 		cfg:        cfg,
 		log:        cfg.Log.With("component", "hub"),
 		browsers:   map[*browser]struct{}{},
 		transcript: NewTranscript(),
+		voices:     map[string]*voiceSession{},
 	}
 }
 
@@ -174,7 +193,9 @@ func (h *Hub) serveBoard(w http.ResponseWriter, r *http.Request) {
 		conn: conn, send: make(chan []byte, boardQueueLen), cancel: cancel,
 		id: hello.ID, name: hello.Name, fw: hello.FW, apiBase: apiBase,
 		proxy: newProxy(apiBase), since: time.Now(),
+		voiceQ: newVoiceQueue(conn, h.cfg.VoiceLead),
 	}
+	b.voice = h.voiceFor(b.id)
 
 	h.mu.Lock()
 	old := h.board
@@ -187,14 +208,23 @@ func (h *Hub) serveBoard(w http.ResponseWriter, r *http.Request) {
 		old.cancel()
 	}
 
-	welcome, _ := json.Marshal(map[string]any{"type": "welcome", "hub": "nexus-hub " + h.cfg.Version, "proto": ProtocolVersion})
+	// voice: PCM both ways, or false without a Gemini key (the board then
+	// keeps its sessions direct).
+	var voice any = false
+	if h.voiceEnabled() {
+		voice = map[string]any{"up": "pcm", "down": "pcm", "down_rate": voiceRate}
+	}
+	welcome, _ := json.Marshal(map[string]any{"type": "welcome", "hub": "nexus-hub " + h.cfg.Version,
+		"proto": ProtocolVersion, "voice": voice})
 	if err := h.writeNow(conn, welcome); err != nil {
 		h.dropBoard(b, err)
 		return
 	}
 	h.log.Info("Board connected", "id", b.id, "name", b.name, "fw", b.fw, "api", apiBase.String())
 
+	b.voice.attach(b)
 	go h.boardWriter(ctx, b)
+	go b.voiceQ.run(ctx, func(err error) { h.dropBoard(b, err) })
 	go h.pinger(ctx, conn, func(err error) { h.dropBoard(b, err) })
 	for {
 		typ, data, err := conn.Read(ctx)
@@ -202,13 +232,16 @@ func (h *Hub) serveBoard(w http.ResponseWriter, r *http.Request) {
 			h.dropBoard(b, err)
 			return
 		}
-		if typ == websocket.MessageText {
-			h.fromBoard(data)
+		switch {
+		case typ == websocket.MessageText:
+			h.fromBoard(b, data)
+		case len(data) > 2 && data[0] == chanMic:
+			b.voice.mic(data[2:])
 		}
 	}
 }
 
-func (h *Hub) fromBoard(data []byte) {
+func (h *Hub) fromBoard(b *board, data []byte) {
 	var head struct {
 		Type string `json:"type"`
 	}
@@ -229,6 +262,8 @@ func (h *Hub) fromBoard(data []byte) {
 			return
 		}
 		h.broadcast(data, true)
+	case "session_start", "text_turn", "tool_response", "interrupt", "session_end":
+		b.voice.fromBoard(head.Type, data)
 	default:
 		h.log.Debug("Ignoring board message", "type", head.Type)
 	}
@@ -265,6 +300,7 @@ func (h *Hub) dropBoard(b *board, err error) {
 	h.mu.Unlock()
 	b.cancel()
 	b.conn.Close(websocket.StatusGoingAway, "")
+	b.voice.detach(b)
 	if !current {
 		return
 	}
@@ -449,7 +485,7 @@ func (h *Hub) serveWeb(w http.ResponseWriter, r *http.Request) {
 
 func (h *Hub) serveStatus(w http.ResponseWriter, r *http.Request) {
 	h.mu.Lock()
-	status := map[string]any{"version": h.cfg.Version, "browsers": len(h.browsers)}
+	status := map[string]any{"version": h.cfg.Version, "browsers": len(h.browsers), "voice": h.voiceEnabled()}
 	if b := h.board; b != nil {
 		status["board"] = map[string]any{
 			"id": b.id, "name": b.name, "fw": b.fw, "api": b.apiBase.String(),

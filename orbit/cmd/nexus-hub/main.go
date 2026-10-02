@@ -31,6 +31,11 @@ func main() {
 	webDir := flag.String("web", "", "dashboard build to serve (waveshare-dashboard: npm run build -- --mode device, then dist/)")
 	mdns := flag.Bool("mdns", true, "advertise _nexus-hub._tcp so boards find the hub")
 	mdnsIface := flag.String("mdns-iface", "", "interfaces to advertise on, comma-separated (default: the LAN ones)")
+	geminiKeyFile := flag.String("gemini-key-file", filepath.Join(home, ".config", "nexus", "gemini_key"),
+		"Gemini API key for voice sessions (missing: no voice through the hub; boards stay direct)")
+	mcpURL := flag.String("mcp-url", os.Getenv("NEXUS_MCP_URL"), "MCP server for voice tools (default $NEXUS_MCP_URL; empty = none)")
+	mcpTokenFile := flag.String("mcp-token-file", filepath.Join(home, ".config", "nexus", "mcp_token"), "MCP bearer token")
+	mcpMaxTools := flag.Int("mcp-max-tools", hub.DefaultMCPMaxTools, "most MCP tools offered to Gemini")
 	debug := flag.Bool("debug", false, "debug logging")
 	flag.Parse()
 
@@ -54,7 +59,23 @@ func main() {
 		}
 	}
 
-	h := hub.New(hub.Config{Version: version, Tokens: tokens, WebDir: *webDir, Log: log})
+	geminiKey := readSecret(*geminiKeyFile)
+	if geminiKey == "" {
+		log.Warn("No Gemini key: voice sessions stay on the board", "file", *geminiKeyFile)
+	}
+	var mcp *hub.MCPClient
+	if *mcpURL != "" {
+		mcp = hub.NewMCPClient(*mcpURL, readSecret(*mcpTokenFile), *mcpMaxTools, log)
+		// List the tools now, so the first session's setup doesn't wait for it.
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			mcp.Declarations(ctx, nil, false)
+		}()
+	}
+
+	h := hub.New(hub.Config{Version: version, Tokens: tokens, WebDir: *webDir, Log: log,
+		GeminiKey: geminiKey, MCP: mcp})
 	srv := &http.Server{Addr: *listen, Handler: h.Handler(), ReadHeaderTimeout: 10 * time.Second}
 
 	ln, err := net.Listen("tcp", *listen)
@@ -95,11 +116,22 @@ func main() {
 		srv.Shutdown(sctx)
 	}()
 
-	log.Info("nexus-hub listening", "version", version, "port", port, "web", *webDir, "tokens", len(tokens))
+	log.Info("nexus-hub listening", "version", version, "port", port, "web", *webDir, "tokens", len(tokens),
+		"voice", geminiKey != "", "mcp", mcp != nil)
 	if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Error("Server failed", "err", err)
 		os.Exit(1)
 	}
+}
+
+// readSecret returns the first line of a file, "" if it can't be read.
+func readSecret(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	line, _, _ := strings.Cut(string(data), "\n")
+	return strings.TrimSpace(line)
 }
 
 // readTokens reads one token per line; blank lines and # comments are skipped.

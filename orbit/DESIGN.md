@@ -229,7 +229,7 @@ nexus-orbit/
 
 A second program in this repository: the waveshare board's hub on the LAN.
 The design is `docs/plans/hub-relay-design.md` in the waveshare repository;
-phase 1 (built) is the link and the dashboard:
+phase 1 is the link and the dashboard, phase 2 voice sessions:
 
 - `/hub/board`: the board connects here (`HubLink` on the board). `hello`
   with a token from the token file, `welcome`, then the board's state pushes
@@ -239,6 +239,14 @@ phase 1 (built) is the link and the dashboard:
 - `/api/*`: forwarded to the board's HTTP server.
 - Everything else: the dashboard (`--web`, its device build).
 - Advertised over mDNS as `_nexus-hub._tcp` on LAN interfaces.
+- Voice (`pkg/hub/voice.go`): the board sends its Gemini setup with
+  `session_start` and its mic as binary frames (channel 1, 16 kHz PCM); the
+  hub holds the Gemini Live connection and sends the reply down as 24 kHz PCM
+  (channel 2), paced 1.5 s ahead of playback. Board skills go to the board as
+  `tool_call`; MCP tools are called by the hub. Resumption, goAway handoffs,
+  the Google Search quota fallback and keeping the connection open after a
+  session (`keepalive_s`) are handled here. Without a Gemini key the welcome
+  says `voice: false` and the board stays direct.
 
 | Flag | Default | Description |
 |---|---|---|
@@ -247,6 +255,10 @@ phase 1 (built) is the link and the dashboard:
 | `--web` | none | Dashboard build folder (`waveshare-dashboard`: `npx vite build --mode device`, then `dist`) |
 | `--mdns` | `true` | Advertise `_nexus-hub._tcp` |
 | `--mdns-iface` | LAN interfaces | Interfaces to advertise on, comma-separated |
+| `--gemini-key-file` | `~/.config/nexus/gemini_key` | Gemini API key (first line); missing = no voice through the hub |
+| `--mcp-url` | `$NEXUS_MCP_URL` | MCP server for voice tools; empty = none |
+| `--mcp-token-file` | `~/.config/nexus/mcp_token` | MCP bearer token |
+| `--mcp-max-tools` | 32 | Most MCP tools offered to Gemini |
 
 `make run-hub` builds it and serves `../waveshare-dashboard/dist`;
 `make build-hub-pi` builds it for a 64-bit Pi.
