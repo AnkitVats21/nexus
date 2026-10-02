@@ -1,11 +1,14 @@
-// Package hub is the board's hub on the LAN (nexus-hub): the waveshare
-// board connects to it, and it serves the dashboard to any number of
-// browsers. See docs/plans/hub-relay-design.md in the waveshare repository.
+// Package hub is nexus-hub, the brain on the LAN: devices (edges: the
+// waveshare board, Orbit, later others) connect to it with the roles they
+// take, and it serves the dashboard to any number of browsers. The protocol
+// is docs/PROTOCOL.md; the plan is docs/plans/hub-relay-design.md in the
+// waveshare repository.
 //
-// Phase 1: the link and the dashboard. Phase 2: voice sessions (voice.go).
-//   - /hub/board: the board's WebSocket. hello (token) -> welcome; then
-//     state pushes (JSON without "type", the same as the board's /api/ws)
-//     and transcript messages come up, and browser commands go down.
+//   - /hub/edge (and /hub/board): an edge's WebSocket. hello (token, roles)
+//     -> welcome. Voice sessions (voice.go), music (music.go), and for the
+//     edge with the state role (the board) its state pushes (JSON without
+//     "type", the same as the board's /api/ws) and transcript messages,
+//     with browser commands going down.
 //   - /api/ws: browsers. Each gets the latest state at once and every push
 //     after; their {"cmd"} frames go to the board. {"cmd":"subscribe"} is
 //     handled here (the hub keeps the transcript).
@@ -34,8 +37,9 @@ import (
 )
 
 const (
-	ProtocolVersion = 1
-	BoardPath       = "/hub/board"
+	ProtocolVersion = 2
+	EdgePath        = "/hub/edge"
+	BoardPath       = "/hub/board" // proto 1 boards; the same endpoint
 
 	helloTimeout    = 10 * time.Second
 	pingInterval    = 5 * time.Second
@@ -68,6 +72,8 @@ type Config struct {
 	MCP *MCPClient
 	// How far ahead of playback the reply is sent (defaultVoiceLead).
 	VoiceLead time.Duration
+	// Where songs are looked up (nil = the hub doesn't run the music).
+	Tracks TrackSource
 }
 
 type Hub struct {
@@ -75,26 +81,52 @@ type Hub struct {
 	log *slog.Logger
 
 	mu        sync.Mutex
-	board     *board
+	edges     map[string]*edge // by id
+	board     *edge            // the edge with the state role (the dashboard's)
 	lastState []byte
 	browsers  map[*browser]struct{}
+
+	music *Music
 
 	transcript *Transcript
 	voices     map[string]*voiceSession // by board id
 }
 
-type board struct {
+type edge struct {
 	conn    *websocket.Conn
 	send    chan []byte
 	cancel  context.CancelFunc
 	id      string
 	name    string
+	kind    string
 	fw      string
-	apiBase *url.URL
+	roles   edgeRoles
+	legacy  bool     // proto 1 hello (no roles): runs its own music
+	apiBase *url.URL // state role only
 	proxy   *httputil.ReverseProxy
 	since   time.Time
 	voiceQ  *voiceQueue
 	voice   *voiceSession
+}
+
+// edgeRoles are the roles an edge takes (docs/PROTOCOL.md section 2); nil
+// is a role not taken.
+type edgeRoles struct {
+	Voice *struct {
+		Up   []string `json:"up"`
+		Down []string `json:"down"`
+	} `json:"voice,omitempty"`
+	Player     *playerRole `json:"player,omitempty"`
+	Controller bool        `json:"controller,omitempty"`
+	State      *struct {
+		HTTPPort int `json:"http_port"`
+	} `json:"state,omitempty"`
+}
+
+type playerRole struct {
+	URL       bool `json:"url"`        // plays a stream URL
+	Resolves  bool `json:"resolves"`   // plays from a video id alone
+	QueueCopy bool `json:"queue_copy"` // keeps the queue, carries on alone
 }
 
 type browser struct {
@@ -105,13 +137,15 @@ type browser struct {
 }
 
 type helloMsg struct {
-	Type     string `json:"type"`
-	Proto    int    `json:"proto"`
-	ID       string `json:"id"`
-	Name     string `json:"name"`
-	FW       string `json:"fw"`
-	HTTPPort int    `json:"http_port"`
-	Token    string `json:"token"`
+	Type     string     `json:"type"`
+	Proto    int        `json:"proto"`
+	ID       string     `json:"id"`
+	Name     string     `json:"name"`
+	Kind     string     `json:"kind"`
+	FW       string     `json:"fw"`
+	HTTPPort int        `json:"http_port"` // proto 1
+	Token    string     `json:"token"`
+	Roles    *edgeRoles `json:"roles"`
 }
 
 func New(cfg Config) *Hub {
@@ -124,20 +158,26 @@ func New(cfg Config) *Hub {
 	if cfg.VoiceLead <= 0 {
 		cfg.VoiceLead = defaultVoiceLead
 	}
-	return &Hub{
+	h := &Hub{
 		cfg:        cfg,
 		log:        cfg.Log.With("component", "hub"),
+		edges:      map[string]*edge{},
 		browsers:   map[*browser]struct{}{},
 		transcript: NewTranscript(),
 		voices:     map[string]*voiceSession{},
 	}
+	if cfg.Tracks != nil {
+		h.music = newMusic(h, cfg.Tracks)
+	}
+	return h
 }
 
 // Handler serves the board endpoint, the browser socket, the API proxy and
 // the dashboard.
 func (h *Hub) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc(BoardPath, h.serveBoard)
+	mux.HandleFunc(EdgePath, h.serveEdge)
+	mux.HandleFunc(BoardPath, h.serveEdge)
 	mux.HandleFunc("/hub/status", h.serveStatus)
 	mux.HandleFunc("/api/ws", h.serveBrowser)
 	mux.HandleFunc("/api/", h.serveAPI)
@@ -146,7 +186,7 @@ func (h *Hub) Handler() http.Handler {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Board
+// Edges
 // ─────────────────────────────────────────────────────────────────────────────
 
 func (h *Hub) tokenOK(token string) bool {
@@ -159,7 +199,7 @@ func (h *Hub) tokenOK(token string) bool {
 	return ok
 }
 
-func (h *Hub) serveBoard(w http.ResponseWriter, r *http.Request) {
+func (h *Hub) serveEdge(w http.ResponseWriter, r *http.Request) {
 	conn, err := websocket.Accept(w, r, nil)
 	if err != nil {
 		return
@@ -170,41 +210,62 @@ func (h *Hub) serveBoard(w http.ResponseWriter, r *http.Request) {
 	typ, data, err := conn.Read(helloCtx)
 	cancelHello()
 	var hello helloMsg
-	if err != nil || typ != websocket.MessageText || json.Unmarshal(data, &hello) != nil || hello.Type != "hello" {
+	if err != nil || typ != websocket.MessageText || json.Unmarshal(data, &hello) != nil || hello.Type != "hello" || hello.ID == "" {
 		conn.Close(websocket.StatusPolicyViolation, "expected hello")
 		return
 	}
 	if !h.tokenOK(hello.Token) {
-		h.log.Warn("Board refused: bad token", "id", hello.ID, "addr", r.RemoteAddr)
+		h.log.Warn("Edge refused: bad token", "id", hello.ID, "addr", r.RemoteAddr)
 		h.writeNow(conn, map[string]any{"type": "rejected", "reason": "bad token"})
 		conn.Close(closeRejected, "bad token")
 		return
 	}
 
-	host, _, _ := net.SplitHostPort(r.RemoteAddr)
-	port := hello.HTTPPort
-	if port == 0 {
-		port = 80
+	roles := hello.Roles
+	if roles == nil {
+		// Proto 1: the waveshare board, voice and state.
+		roles = &edgeRoles{}
+		roles.Voice = &struct {
+			Up   []string `json:"up"`
+			Down []string `json:"down"`
+		}{}
+		roles.State = &struct {
+			HTTPPort int `json:"http_port"`
+		}{HTTPPort: hello.HTTPPort}
 	}
-	apiBase := &url.URL{Scheme: "http", Host: net.JoinHostPort(host, fmt.Sprint(port))}
-
 	ctx, cancel := context.WithCancel(context.Background())
-	b := &board{
+	b := &edge{
 		conn: conn, send: make(chan []byte, boardQueueLen), cancel: cancel,
-		id: hello.ID, name: hello.Name, fw: hello.FW, apiBase: apiBase,
-		proxy: newProxy(apiBase), since: time.Now(),
-		voiceQ: newVoiceQueue(conn, h.cfg.VoiceLead),
+		id: hello.ID, name: hello.Name, kind: hello.Kind, fw: hello.FW, roles: *roles, legacy: hello.Roles == nil,
+		since: time.Now(), voiceQ: newVoiceQueue(conn, h.cfg.VoiceLead),
+	}
+	if b.name == "" {
+		b.name = b.id
+	}
+	if roles.State != nil {
+		host, _, _ := net.SplitHostPort(r.RemoteAddr)
+		port := roles.State.HTTPPort
+		if port == 0 {
+			port = 80
+		}
+		b.apiBase = &url.URL{Scheme: "http", Host: net.JoinHostPort(host, fmt.Sprint(port))}
+		b.proxy = newProxy(b.apiBase)
 	}
 	b.voice = h.voiceFor(b.id)
 
 	h.mu.Lock()
-	old := h.board
-	h.board = b
-	h.lastState = nil
+	old := h.edges[b.id]
+	h.edges[b.id] = b
+	if roles.State != nil {
+		h.board = b
+		h.lastState = nil
+	}
 	h.mu.Unlock()
-	h.transcript.Reset()
+	if roles.State != nil {
+		h.transcript.Reset()
+	}
 	if old != nil {
-		old.conn.Close(closeReplaced, "another board connection")
+		old.conn.Close(closeReplaced, "another connection with this id")
 		old.cancel()
 	}
 
@@ -214,15 +275,19 @@ func (h *Hub) serveBoard(w http.ResponseWriter, r *http.Request) {
 	if h.voiceEnabled() {
 		voice = map[string]any{"up": "pcm", "down": "pcm", "down_rate": voiceRate}
 	}
+	proto := min(ProtocolVersion, max(hello.Proto, 1))
 	welcome, _ := json.Marshal(map[string]any{"type": "welcome", "hub": "nexus-hub " + h.cfg.Version,
-		"proto": ProtocolVersion, "voice": voice})
+		"proto": proto, "voice": voice, "music": h.music != nil})
 	if err := h.writeNow(conn, welcome); err != nil {
 		h.dropBoard(b, err)
 		return
 	}
-	h.log.Info("Board connected", "id", b.id, "name", b.name, "fw", b.fw, "api", apiBase.String())
+	h.log.Info("Edge connected", "id", b.id, "name", b.name, "kind", b.kind, "fw", b.fw, "roles", b.roles.String())
 
 	b.voice.attach(b)
+	if h.music != nil {
+		h.music.edgeJoined(b)
+	}
 	go h.boardWriter(ctx, b)
 	go b.voiceQ.run(ctx, func(err error) { h.dropBoard(b, err) })
 	go h.pinger(ctx, conn, func(err error) { h.dropBoard(b, err) })
@@ -245,7 +310,7 @@ func (h *Hub) serveBoard(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (h *Hub) fromBoard(b *board, data []byte) {
+func (h *Hub) fromBoard(b *edge, data []byte) {
 	var head struct {
 		Type string `json:"type"`
 	}
@@ -257,9 +322,14 @@ func (h *Hub) fromBoard(b *board, data []byte) {
 	case "":
 		// A state push: the latest goes to every browser, and to new ones.
 		h.mu.Lock()
-		h.lastState = data
+		current := h.board == b
+		if current {
+			h.lastState = data
+		}
 		h.mu.Unlock()
-		h.broadcast(data, false)
+		if current {
+			h.broadcast(data, false)
+		}
 	case "transcript":
 		if err := h.transcript.Merge(data); err != nil {
 			h.log.Warn("Bad transcript message", "err", err)
@@ -268,12 +338,16 @@ func (h *Hub) fromBoard(b *board, data []byte) {
 		h.broadcast(data, true)
 	case "session_start", "text_turn", "tool_response", "interrupt", "session_end":
 		b.voice.fromBoard(head.Type, data)
+	case "voice_activity", "music_action", "music_report", "music_event", "music_renew", "music_sync":
+		if h.music != nil {
+			h.music.fromEdge(b, head.Type, data)
+		}
 	default:
 		h.log.Debug("Ignoring board message", "type", head.Type)
 	}
 }
 
-func (h *Hub) boardWriter(ctx context.Context, b *board) {
+func (h *Hub) boardWriter(ctx context.Context, b *edge) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -290,8 +364,12 @@ func (h *Hub) boardWriter(ctx context.Context, b *board) {
 	}
 }
 
-func (h *Hub) dropBoard(b *board, err error) {
+func (h *Hub) dropBoard(b *edge, err error) {
 	h.mu.Lock()
+	present := h.edges[b.id] == b
+	if present {
+		delete(h.edges, b.id)
+	}
 	current := h.board == b
 	var browsers []*browser
 	if current {
@@ -305,14 +383,24 @@ func (h *Hub) dropBoard(b *board, err error) {
 	b.cancel()
 	b.conn.Close(websocket.StatusGoingAway, "")
 	b.voice.detach(b)
+	if !present {
+		return
+	}
+	if h.music != nil {
+		h.music.edgeLeft(b)
+	}
+	h.log.Info("Edge disconnected", "id", b.id, "reason", errText(err))
 	if !current {
 		return
 	}
-	h.log.Info("Board disconnected", "id", b.id, "reason", errText(err))
-	// The browsers reconnect and wait for the board.
+	// The browsers reconnect and wait for the board. Each close waits for
+	// the browser's answer (up to 5 s), so one stuck browser mustn't hold
+	// up the others.
 	for _, br := range browsers {
-		br.conn.Close(closeBoardOffline, "board offline")
-		br.cancel()
+		go func() {
+			br.conn.Close(closeBoardOffline, "board offline")
+			br.cancel()
+		}()
 	}
 }
 
@@ -489,13 +577,20 @@ func (h *Hub) serveWeb(w http.ResponseWriter, r *http.Request) {
 
 func (h *Hub) serveStatus(w http.ResponseWriter, r *http.Request) {
 	h.mu.Lock()
-	status := map[string]any{"version": h.cfg.Version, "browsers": len(h.browsers), "voice": h.voiceEnabled()}
+	status := map[string]any{"version": h.cfg.Version, "browsers": len(h.browsers), "voice": h.voiceEnabled(),
+		"music": h.music != nil}
 	if b := h.board; b != nil {
 		status["board"] = map[string]any{
 			"id": b.id, "name": b.name, "fw": b.fw, "api": b.apiBase.String(),
 			"connected_s": int(time.Since(b.since).Seconds()),
 		}
 	}
+	var edges []map[string]any
+	for _, e := range h.edges {
+		edges = append(edges, map[string]any{"id": e.id, "name": e.name, "kind": e.kind, "fw": e.fw,
+			"roles": e.roles.String(), "connected_s": int(time.Since(e.since).Seconds())})
+	}
+	status["edges"] = edges
 	h.mu.Unlock()
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(status)
@@ -545,4 +640,22 @@ func errText(err error) string {
 		return fmt.Sprintf("closed %d %s", ce.Code, ce.Reason)
 	}
 	return strings.TrimSpace(err.Error())
+}
+
+// String lists the roles taken, for logs and the status page.
+func (r edgeRoles) String() string {
+	var names []string
+	if r.Voice != nil {
+		names = append(names, "voice")
+	}
+	if r.Player != nil {
+		names = append(names, "player")
+	}
+	if r.Controller {
+		names = append(names, "controller")
+	}
+	if r.State != nil {
+		names = append(names, "state")
+	}
+	return strings.Join(names, ",")
 }

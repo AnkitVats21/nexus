@@ -250,6 +250,13 @@ phase 1 is the link and the dashboard, phase 2 voice sessions:
   the Google Search quota fallback and keeping the connection open after a
   session (`keepalive_s`) are handled here. Without a Gemini key the welcome
   says `voice: false` and the board stays direct.
+- Edges and music (`pkg/hub/music.go`, `tracks.go`; phase 3): an edge says
+  its roles in the hello (`docs/PROTOCOL.md`). The hub owns the queue and
+  picks the player; lookups go through nexus-mcp `music_track`, with
+  invidious-daemon as the fallback, and the next song's stream URL is
+  fetched ahead. In a hub voice session the music tools (`play`,
+  `playback`, `music_output`) run here. A proto 1 board (no roles) keeps
+  its own music.
 
 | Flag | Default | Description |
 |---|---|---|
@@ -262,6 +269,8 @@ phase 1 is the link and the dashboard, phase 2 voice sessions:
 | `--mcp-url` | `$NEXUS_MCP_URL` | MCP server for voice tools; empty = none |
 | `--mcp-token-file` | `~/.config/nexus/mcp_token` | MCP bearer token |
 | `--mcp-max-tools` | 32 | Most MCP tools offered to Gemini |
+| `--music` | `true` | Run the music for the edges (needs `--mcp-url` or `--invidious-url`) |
+| `--invidious-url` | `$NEXUS_INVIDIOUS_URL` | Invidious-compatible API (invidious-daemon) for music lookups, used after MCP fails |
 
 `make run-hub` builds it and serves `../waveshare-dashboard/dist`;
 `make build-hub-pi` builds it for a 64-bit Pi.

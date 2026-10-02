@@ -36,6 +36,9 @@ func main() {
 	mcpURL := flag.String("mcp-url", os.Getenv("NEXUS_MCP_URL"), "MCP server for voice tools (default $NEXUS_MCP_URL; empty = none)")
 	mcpTokenFile := flag.String("mcp-token-file", filepath.Join(home, ".config", "nexus", "mcp_token"), "MCP bearer token")
 	mcpMaxTools := flag.Int("mcp-max-tools", hub.DefaultMCPMaxTools, "most MCP tools offered to Gemini")
+	music := flag.Bool("music", true, "run the music (queue, lookups, outputs) for the edges")
+	invidiousURL := flag.String("invidious-url", os.Getenv("NEXUS_INVIDIOUS_URL"),
+		"Invidious-compatible API (invidious-daemon) for music lookups, after MCP (default $NEXUS_INVIDIOUS_URL)")
 	debug := flag.Bool("debug", false, "debug logging")
 	flag.Parse()
 
@@ -74,8 +77,19 @@ func main() {
 		}()
 	}
 
+	var tracks hub.TrackSource
+	if *music {
+		switch {
+		case mcp != nil && *invidiousURL != "":
+			tracks = hub.FallbackTracks{Primary: hub.MCPTracks{C: mcp}, Secondary: hub.NewInvidiousTracks(*invidiousURL)}
+		case mcp != nil:
+			tracks = hub.MCPTracks{C: mcp}
+		case *invidiousURL != "":
+			tracks = hub.NewInvidiousTracks(*invidiousURL)
+		}
+	}
 	h := hub.New(hub.Config{Version: version, Tokens: tokens, WebDir: *webDir, Log: log,
-		GeminiKey: geminiKey, MCP: mcp})
+		GeminiKey: geminiKey, MCP: mcp, Tracks: tracks})
 	srv := &http.Server{Addr: *listen, Handler: h.Handler(), ReadHeaderTimeout: 10 * time.Second}
 
 	ln, err := net.Listen("tcp", *listen)
@@ -117,7 +131,7 @@ func main() {
 	}()
 
 	log.Info("nexus-hub listening", "version", version, "port", port, "web", *webDir, "tokens", len(tokens),
-		"voice", geminiKey != "", "mcp", mcp != nil)
+		"voice", geminiKey != "", "mcp", mcp != nil, "music", trackSourceName(tracks))
 	if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Error("Server failed", "err", err)
 		os.Exit(1)
@@ -198,4 +212,11 @@ func lanInterfaces(named string) []net.Interface {
 		}
 	}
 	return out
+}
+
+func trackSourceName(t hub.TrackSource) string {
+	if t == nil {
+		return "off"
+	}
+	return t.Name()
 }

@@ -136,6 +136,40 @@ func (c *MCPClient) Call(ctx context.Context, name string, args json.RawMessage)
 	return formatToolResult(res)
 }
 
+// CallStructured runs a tool and decodes its structured result into out
+// (the device-only music tools). A tool error is an error.
+func (c *MCPClient) CallStructured(ctx context.Context, name string, args json.RawMessage, out any) error {
+	if c == nil {
+		return errors.New("no MCP server")
+	}
+	params, _ := json.Marshal(map[string]any{"name": name, "arguments": args})
+	res, err := c.rpc(ctx, "tools/call", params)
+	if err != nil {
+		return err
+	}
+	var r struct {
+		IsError bool `json:"isError"`
+		Content []struct {
+			Text string `json:"text"`
+		} `json:"content"`
+		StructuredContent json.RawMessage `json:"structuredContent"`
+	}
+	if err := json.Unmarshal(res, &r); err != nil {
+		return fmt.Errorf("%s: bad result: %w", name, err)
+	}
+	if r.IsError {
+		msg := name + " failed"
+		if len(r.Content) > 0 && r.Content[0].Text != "" {
+			msg = r.Content[0].Text
+		}
+		return errors.New(msg)
+	}
+	if len(r.StructuredContent) == 0 || string(r.StructuredContent) == "null" {
+		return fmt.Errorf("%s: no structured result", name)
+	}
+	return json.Unmarshal(r.StructuredContent, out)
+}
+
 func (c *MCPClient) listTools(ctx context.Context) ([]mcpTool, error) {
 	c.mu.Lock()
 	if c.tools != nil && time.Since(c.toolsAt) < mcpToolsMaxAge {

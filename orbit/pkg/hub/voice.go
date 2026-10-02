@@ -65,15 +65,16 @@ type voiceSession struct {
 	log *slog.Logger
 
 	mu        sync.Mutex
-	b         *board // nil while the board is away
-	active    bool   // a board session is running
-	announced bool   // session_ready sent for this session
+	b         *edge // nil while the board is away
+	active    bool  // a board session is running
+	announced bool  // session_ready sent for this session
 	tries     int
 	gc        *geminiConn
 	parkTimer *time.Timer
 
 	start         sessionStartMsg
 	boardTools    map[string]bool
+	musicTools    bool // the hub's music tools replace the edge's
 	handle        string
 	handleAt      time.Time
 	forceResume   bool
@@ -109,14 +110,14 @@ func (h *Hub) voiceFor(id string) *voiceSession {
 
 func (h *Hub) voiceEnabled() bool { return h.cfg.GeminiKey != "" }
 
-func (v *voiceSession) attach(b *board) {
+func (v *voiceSession) attach(b *edge) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	v.b = b
 }
 
 // detach: the board's connection is gone; its session ends with it.
-func (v *voiceSession) detach(b *board) {
+func (v *voiceSession) detach(b *edge) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	if v.b != b {
@@ -225,7 +226,14 @@ func (v *voiceSession) startSession(m sessionStartMsg) {
 	v.announced = false
 	v.tries = 0
 	v.start = m
+	v.musicTools = v.h.music != nil && v.b != nil && !v.b.legacy
 	v.boardTools = declaredNames(m.Setup)
+	if v.musicTools {
+		for n := range musicToolNames {
+			delete(v.boardTools, n)
+		}
+		v.h.music.voiceActive(v.id, true)
+	}
 	v.pendingMic, v.pendingSize = nil, 0
 	v.pendingText = m.Text
 	v.owed = m.Text != ""
@@ -250,6 +258,9 @@ func (v *voiceSession) endLocked(keep bool) {
 	v.active = false
 	if wasActive {
 		v.log.Info("Voice session ended", "mic_ms", v.micBytes/32)
+		if v.h.music != nil {
+			v.h.music.voiceActive(v.id, false)
+		}
 	}
 	v.micBytes = 0
 	v.pendingMic, v.pendingSize, v.pendingText = nil, 0, ""
@@ -307,6 +318,18 @@ func (v *voiceSession) buildSetupLocked() ([]byte, *geminiConn) {
 		tools = append([]any{first}, tools...)
 	}
 	decls, _ := first["functionDeclarations"].([]any)
+	if v.musicTools {
+		kept := decls[:0]
+		for _, d := range decls {
+			if dm, _ := d.(map[string]any); dm == nil || !musicToolNames[fmt.Sprint(dm["name"])] {
+				kept = append(kept, d)
+			}
+		}
+		decls = kept
+		for _, d := range musicToolDeclarations() {
+			decls = append(decls, d)
+		}
+	}
 	if gc.search {
 		// get_weather is the fallback for models without search.
 		kept := decls[:0]
@@ -492,6 +515,11 @@ func (v *voiceSession) onGemini(gc *geminiConn, data []byte) {
 			if fc.ID == "" {
 				continue
 			}
+			if v.musicTools && musicToolNames[fc.Name] {
+				v.sendBoardLocked(map[string]any{"type": "reply_owed"})
+				go v.callMusic(gc, fc.ID, fc.Name, fc.Args)
+				continue
+			}
 			if !v.boardTools[fc.Name] && v.h.cfg.MCP.Has(fc.Name) {
 				v.sendBoardLocked(map[string]any{"type": "reply_owed"})
 				go v.callMCP(gc, fc.ID, fc.Name, fc.Args)
@@ -667,6 +695,16 @@ func (v *voiceSession) callMCP(gc *geminiConn, id, name string, args json.RawMes
 	t0 := time.Now()
 	res := v.h.cfg.MCP.Call(ctx, name, args)
 	v.log.Info("MCP tool", "name", name, "ms", time.Since(t0).Milliseconds(), "bytes", len(res))
+	v.sendToolResponse(gc, id, res)
+}
+
+func (v *voiceSession) callMusic(gc *geminiConn, id, name string, args json.RawMessage) {
+	v.mu.Lock()
+	from := v.b
+	v.mu.Unlock()
+	t0 := time.Now()
+	res := v.h.music.toolCall(from, name, args)
+	v.log.Info("Music tool", "name", name, "ms", time.Since(t0).Milliseconds(), "result", string(res))
 	v.sendToolResponse(gc, id, res)
 }
 
