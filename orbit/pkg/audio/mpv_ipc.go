@@ -28,6 +28,7 @@ type mpvResponse struct {
 	Event     string          `json:"event"`
 	Name      string          `json:"name"`
 	Reason    string          `json:"reason"`
+	FileError string          `json:"file_error"`
 }
 
 // MPVIPCClient manages a JSON-IPC connection to a running mpv instance.
@@ -42,11 +43,11 @@ type MPVIPCClient struct {
 	reqID   int
 	pending map[int]chan mpvResponse
 
-	statusMu     sync.RWMutex
+	statusMu      sync.RWMutex
 	currentStatus PlayerStatus
-	wasIdle      bool
+	paused        bool // mpv's pause property
 
-	onTrackEnded   func()
+	onTrackEnded   func(err error)
 	onStatusChange func(status PlayerStatus)
 
 	closed  atomic.Bool
@@ -96,7 +97,10 @@ func (c *MPVIPCClient) Connect() error {
 	return nil
 }
 
-func (c *MPVIPCClient) OnTrackEnded(fn func()) {
+// OnTrackEnded is called when a track plays to its end (err nil) or fails
+// (err set). A track that is stopped or replaced by the next one does not
+// count.
+func (c *MPVIPCClient) OnTrackEnded(fn func(err error)) {
 	c.statusMu.Lock()
 	defer c.statusMu.Unlock()
 	c.onTrackEnded = fn
@@ -114,7 +118,6 @@ func (c *MPVIPCClient) LoadURL(url string, startPosMs int64) error {
 	c.statusMu.Lock()
 	c.currentStatus.State = protocol.StateBuffering
 	c.currentStatus.PositionMs = startPosMs
-	c.wasIdle = false
 	c.statusMu.Unlock()
 	c.notifyStatusChange()
 
@@ -335,14 +338,32 @@ func (c *MPVIPCClient) handleEvent(resp mpvResponse) {
 	switch resp.Event {
 	case "property-change":
 		c.handlePropertyChange(resp.Name, resp.Data)
-	case "end-file":
-		c.log.Info("MPV end-file event", "reason", resp.Reason)
-		if resp.Reason == "eof" || resp.Reason == "stop" {
-			c.statusMu.Lock()
-			c.currentStatus.State = protocol.StateStopped
-			c.statusMu.Unlock()
+	case "playback-restart":
+		// Audio is playing (after a load or a seek): buffering is over.
+		c.statusMu.Lock()
+		changed := c.currentStatus.State == protocol.StateBuffering
+		if changed {
+			if c.paused {
+				c.currentStatus.State = protocol.StatePaused
+			} else {
+				c.currentStatus.State = protocol.StatePlaying
+			}
+		}
+		c.statusMu.Unlock()
+		if changed {
 			c.notifyStatusChange()
-			c.notifyTrackEnded()
+		}
+	case "end-file":
+		// "stop" (stopped, or replaced by loadfile) and "quit" are not an end
+		// of the track: Nexus Core would advance its queue on one.
+		c.log.Info("MPV end-file event", "reason", resp.Reason)
+		switch resp.Reason {
+		case "eof":
+			c.setState(protocol.StateIdle)
+			c.notifyTrackEnded(nil)
+		case "error":
+			c.setState(protocol.StateError)
+			c.notifyTrackEnded(fmt.Errorf("mpv: %s", resp.FileError))
 		}
 	}
 }
@@ -365,8 +386,9 @@ func (c *MPVIPCClient) handlePropertyChange(name string, raw json.RawMessage) {
 	case "pause":
 		var paused bool
 		if err := json.Unmarshal(raw, &paused); err == nil {
+			c.paused = paused
 			if paused {
-				if c.currentStatus.State == protocol.StatePlaying {
+				if c.currentStatus.State == protocol.StatePlaying || c.currentStatus.State == protocol.StateBuffering {
 					c.currentStatus.State = protocol.StatePaused
 				}
 			} else {
@@ -384,25 +406,27 @@ func (c *MPVIPCClient) handlePropertyChange(name string, raw json.RawMessage) {
 		var isIdle bool
 		if err := json.Unmarshal(raw, &isIdle); err == nil {
 			if isIdle {
-				// Transition to idle
-				if !c.wasIdle && (c.currentStatus.State == protocol.StatePlaying || c.currentStatus.State == protocol.StatePaused) {
-					c.currentStatus.State = protocol.StateIdle
-					go c.notifyTrackEnded()
-				}
+				// The end of a track is reported from end-file, which says why.
 				c.currentStatus.State = protocol.StateIdle
 			}
-			c.wasIdle = isIdle
 		}
 	}
 }
 
-func (c *MPVIPCClient) notifyTrackEnded() {
+func (c *MPVIPCClient) setState(st protocol.PlaybackState) {
+	c.statusMu.Lock()
+	c.currentStatus.State = st
+	c.statusMu.Unlock()
+	c.notifyStatusChange()
+}
+
+func (c *MPVIPCClient) notifyTrackEnded(err error) {
 	c.statusMu.RLock()
 	fn := c.onTrackEnded
 	c.statusMu.RUnlock()
 
 	if fn != nil {
-		fn()
+		fn(err)
 	}
 }
 

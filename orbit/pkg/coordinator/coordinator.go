@@ -26,6 +26,14 @@ type Coordinator struct {
 	stateMu      sync.RWMutex
 	currentTrack *resolver.ResolvedTrack
 	currentState protocol.PlaybackState
+	// Commands are applied in the order Nexus Core sent them, although a
+	// play resolves in the background: each play takes a new generation (a
+	// later play or a stop makes an older resolve stale), and a pause that
+	// arrives while it resolves is applied once it loads.
+	playGen    uint64
+	pendingID  string // video being resolved ("" when none)
+	pendingPos int64
+	wantPaused bool
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -80,20 +88,41 @@ func (c *Coordinator) Stop() {
 
 // PlayTrack resolves and plays a YouTube video directly.
 func (c *Coordinator) PlayTrack(ctx context.Context, videoID string, startPosMs int64) error {
+	return c.playTrack(ctx, c.beginPlay(videoID, startPosMs), videoID, startPosMs)
+}
+
+// beginPlay starts a new play generation; older resolves still running are
+// dropped when they finish.
+func (c *Coordinator) beginPlay(videoID string, startPosMs int64) uint64 {
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+	c.playGen++
+	c.pendingID = videoID
+	c.pendingPos = startPosMs
+	c.wantPaused = false
+	c.currentState = protocol.StateResolving
+	return c.playGen
+}
+
+func (c *Coordinator) isCurrentPlay(gen uint64) bool {
+	c.stateMu.RLock()
+	defer c.stateMu.RUnlock()
+	return gen == c.playGen
+}
+
+func (c *Coordinator) playTrack(ctx context.Context, gen uint64, videoID string, startPosMs int64) error {
 	c.log.Info("PlayTrack requested", "videoID", videoID, "startPosMs", startPosMs)
 
-	c.setLocalState(protocol.StateResolving)
-
 	resolved, err := c.resolver.Resolve(ctx, videoID)
+	if !c.isCurrentPlay(gen) {
+		c.log.Info("Dropping a superseded play", "videoID", videoID)
+		return nil
+	}
 	if err != nil {
-		c.setLocalState(protocol.StateError)
+		c.endPending(gen, protocol.StateError)
 		c.sendEvent("error", videoID, fmt.Sprintf("resolution failed: %v", err))
 		return fmt.Errorf("failed to resolve track %s: %w", videoID, err)
 	}
-
-	c.stateMu.Lock()
-	c.currentTrack = resolved
-	c.stateMu.Unlock()
 
 	c.log.Info("Track resolved successfully",
 		"videoID", resolved.VideoID,
@@ -102,7 +131,7 @@ func (c *Coordinator) PlayTrack(ctx context.Context, videoID string, startPosMs 
 	)
 
 	if err := c.player.LoadURL(resolved.PlaybackURL, startPosMs); err != nil {
-		c.setLocalState(protocol.StateError)
+		c.endPending(gen, protocol.StateError)
 		c.sendEvent("error", videoID, fmt.Sprintf("player load failed: %v", err))
 		return fmt.Errorf("failed to load audio URL: %w", err)
 	}
@@ -112,18 +141,36 @@ func (c *Coordinator) PlayTrack(ctx context.Context, videoID string, startPosMs 
 		_ = c.player.SetMediaTitle(resolved.Title, resolved.Artist)
 	}
 
-	c.setLocalState(protocol.StatePlaying)
+	c.stateMu.Lock()
+	if gen == c.playGen {
+		c.currentTrack = resolved
+		c.pendingID = ""
+		c.currentState = protocol.StatePlaying
+	}
+	paused := c.wantPaused
+	c.stateMu.Unlock()
+	if paused {
+		_ = c.player.Pause()
+	}
 	return nil
+}
+
+// endPending clears the resolve of generation gen, if it is still current.
+func (c *Coordinator) endPending(gen uint64, st protocol.PlaybackState) {
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+	if gen == c.playGen {
+		c.pendingID = ""
+		c.currentState = st
+	}
 }
 
 // ── Private Handlers ─────────────────────────────────────────────────────────
 
 func (c *Coordinator) setupCallbacks() {
-	// MPV track ended callback (EOF reached)
-	c.player.OnTrackEnded(func() {
-		c.log.Info("Audio playback ended (EOF reached)")
-		c.setLocalState(protocol.StateIdle)
-
+	// The track played to its end, or failed. Nexus Core owns the queue: it
+	// sends the next track (or repeats this one) after track_ended.
+	c.player.OnTrackEnded(func(err error) {
 		c.stateMu.RLock()
 		curID := ""
 		if c.currentTrack != nil {
@@ -131,8 +178,15 @@ func (c *Coordinator) setupCallbacks() {
 		}
 		c.stateMu.RUnlock()
 
+		if err != nil {
+			c.log.Warn("Audio playback failed", "videoID", curID, "err", err)
+			c.setLocalState(protocol.StateError)
+			c.sendEvent("error", curID, err.Error())
+			return
+		}
+		c.log.Info("Audio playback ended (EOF reached)", "videoID", curID)
+		c.setLocalState(protocol.StateIdle)
 		c.sendEvent("track_ended", curID, "")
-		c.sendAction("next", nil) // Prompt Nexus Core to advance queue
 	})
 
 	// MPV status change callback (e.g. keyboard media key toggled pause directly in mpv)
@@ -183,30 +237,30 @@ func (c *Coordinator) handleInboundMessage(data []byte) {
 	}
 
 	switch base.Cmd {
-	case "orbit_route":
-		var route protocol.OrbitRouteMsg
-		if err := json.Unmarshal(data, &route); err == nil {
-			c.log.Info("Received orbit_route command", "videoId", route.VideoID, "posMs", route.PositionMs)
-			go func() {
-				_ = c.PlayTrack(c.ctx, route.VideoID, route.PositionMs)
-			}()
-		}
-
-	case "orbit_play":
+	case "orbit_route", "orbit_play":
+		// Both carry the track and where to start (position_ms, 0 if absent).
 		var play protocol.OrbitRouteMsg
-		if err := json.Unmarshal(data, &play); err == nil {
-			c.log.Info("Received orbit_play command", "videoId", play.VideoID)
+		if err := json.Unmarshal(data, &play); err == nil && play.VideoID != "" {
+			c.log.Info("Received "+base.Cmd+" command", "videoId", play.VideoID, "posMs", play.PositionMs)
+			gen := c.beginPlay(play.VideoID, play.PositionMs)
+			_ = c.player.Stop() // the old track stops now, not when the new one resolves
 			go func() {
-				_ = c.PlayTrack(c.ctx, play.VideoID, 0)
+				_ = c.playTrack(c.ctx, gen, play.VideoID, play.PositionMs)
 			}()
 		}
 
 	case "orbit_pause":
 		c.log.Info("Received orbit_pause command")
+		c.stateMu.Lock()
+		c.wantPaused = true
+		c.stateMu.Unlock()
 		_ = c.player.Pause()
 
 	case "orbit_resume":
 		c.log.Info("Received orbit_resume command")
+		c.stateMu.Lock()
+		c.wantPaused = false
+		c.stateMu.Unlock()
 		_ = c.player.Resume()
 
 	case "orbit_seek":
@@ -225,6 +279,12 @@ func (c *Coordinator) handleInboundMessage(data []byte) {
 
 	case "orbit_stop":
 		c.log.Info("Received orbit_stop command")
+		c.stateMu.Lock()
+		c.playGen++ // a resolve still running is dropped
+		c.pendingID = ""
+		c.wantPaused = false
+		c.currentState = protocol.StateIdle
+		c.stateMu.Unlock()
 		_ = c.player.Stop()
 
 	default:
@@ -261,6 +321,13 @@ func (c *Coordinator) emitTelemetryReport() {
 	if c.currentTrack != nil {
 		vid = c.currentTrack.VideoID
 	}
+	// While a play resolves, report that track as resolving at its start
+	// position (mpv still holds the old track's position).
+	if c.pendingID != "" {
+		vid = c.pendingID
+		status.State = protocol.StateResolving
+		status.PositionMs = c.pendingPos
+	}
 	c.stateMu.RUnlock()
 
 	rep := protocol.OrbitReportMsg{
@@ -291,21 +358,6 @@ func (c *Coordinator) sendEvent(eventType, videoID, msg string) {
 		Message:     msg,
 	}
 	data, err := json.Marshal(evt)
-	if err == nil {
-		_ = c.transport.Send(data)
-	}
-}
-
-func (c *Coordinator) sendAction(action string, val any) {
-	if c.transport == nil {
-		return
-	}
-	act := protocol.NexusActionMsg{
-		Cmd:    "action",
-		Action: action,
-		Value:  val,
-	}
-	data, err := json.Marshal(act)
 	if err == nil {
 		_ = c.transport.Send(data)
 	}

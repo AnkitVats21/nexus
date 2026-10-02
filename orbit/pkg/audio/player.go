@@ -20,7 +20,7 @@ type AudioPlayer interface {
 	SetMediaTitle(title, artist string) error
 	Stop() error
 	GetStatus() (PlayerStatus, error)
-	OnTrackEnded(fn func())
+	OnTrackEnded(fn func(err error)) // err nil: played to the end
 	OnStatusChanged(fn func(status PlayerStatus))
 	Close() error
 }
