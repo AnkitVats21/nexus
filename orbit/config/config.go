@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 )
 
 // Config holds runtime configuration for the nexus-orbit daemon.
@@ -23,6 +24,10 @@ type Config struct {
 	Standalone    bool
 	TestVideoID   string
 	LogLevel      string
+	// The hub (nexus-hub) to join as an edge ("" = talk to the board's
+	// /api/orbit/ws), and its token (the first line of the token file).
+	HubURL   string
+	HubToken string
 }
 
 // LoadConfig parses flags, environment variables, and sensible defaults.
@@ -50,8 +55,24 @@ func LoadConfig() (*Config, error) {
 	flag.BoolVar(&cfg.Standalone, "standalone", getEnvBool("STANDALONE", false), "Run in standalone mode (no Nexus connection)")
 	flag.StringVar(&cfg.TestVideoID, "play", "", "Play a specific YouTube videoId immediately on launch (for testing)")
 	flag.StringVar(&cfg.LogLevel, "log-level", getEnv("LOG_LEVEL", "info"), "Logging level (debug, info, warn, error)")
+	flag.StringVar(&cfg.HubURL, "hub", getEnv("NEXUS_HUB", ""), "Join a nexus-hub as an edge, e.g. ws://host:8380/hub/edge (default $NEXUS_HUB; empty = the board's /api/orbit/ws)")
+	home, _ := os.UserHomeDir()
+	hubTokenFile := flag.String("hub-token-file", filepath.Join(home, ".config", "nexus", "hub_tokens"), "Hub token (first line)")
 
 	flag.Parse()
+
+	if cfg.HubURL != "" {
+		data, err := os.ReadFile(*hubTokenFile)
+		if err != nil {
+			return nil, fmt.Errorf("hub token: %w", err)
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			if line = strings.TrimSpace(line); line != "" && !strings.HasPrefix(line, "#") {
+				cfg.HubToken = line
+				break
+			}
+		}
+	}
 
 	if portFlag != 0 {
 		cfg.NexusPort = portFlag
@@ -68,6 +89,9 @@ func LoadConfig() (*Config, error) {
 
 // EndpointURL formats the full WebSocket URL for connecting to Nexus Core.
 func (c *Config) EndpointURL() string {
+	if c.HubURL != "" {
+		return c.HubURL
+	}
 	return fmt.Sprintf("ws://%s:%d%s", c.NexusHost, c.NexusPort, c.WSPath)
 }
 

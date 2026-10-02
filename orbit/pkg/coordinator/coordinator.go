@@ -34,6 +34,7 @@ type Coordinator struct {
 	pendingID  string // video being resolved ("" when none)
 	pendingPos int64
 	wantPaused bool
+	hubSeq     uint64 // hub mode: the music_play being played
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -124,12 +125,13 @@ func (c *Coordinator) playTrack(ctx context.Context, gen uint64, videoID string,
 		return fmt.Errorf("failed to resolve track %s: %w", videoID, err)
 	}
 
-	c.log.Info("Track resolved successfully",
-		"videoID", resolved.VideoID,
-		"title", resolved.Title,
-		"playbackURL", resolved.PlaybackURL,
-	)
+	c.log.Info("Track resolved successfully", "videoID", resolved.VideoID, "title", resolved.Title)
+	return c.playResolved(gen, resolved, startPosMs)
+}
 
+// playResolved loads a track whose playback URL is known.
+func (c *Coordinator) playResolved(gen uint64, resolved *resolver.ResolvedTrack, startPosMs int64) error {
+	videoID := resolved.VideoID
 	if err := c.player.LoadURL(resolved.PlaybackURL, startPosMs); err != nil {
 		c.endPending(gen, protocol.StateError)
 		c.sendEvent("error", videoID, fmt.Sprintf("player load failed: %v", err))
@@ -198,6 +200,10 @@ func (c *Coordinator) setupCallbacks() {
 }
 
 func (c *Coordinator) handleTransportConnected() {
+	if c.hubMode() {
+		c.hubHello()
+		return
+	}
 	c.log.Info("Registering satellite with Nexus Core")
 	reg := protocol.SatelliteRegisterMsg{
 		Cmd: "satellite_register",
@@ -223,6 +229,12 @@ func (c *Coordinator) transportReadLoop() {
 			return
 		case err := <-errCh:
 			c.log.Warn("Transport error received", "err", err)
+			if c.hubMode() {
+				// The hub owns the queue and the position; without it this
+				// satellite's music stops (docs/PROTOCOL.md section 5.4).
+				c.log.Info("Lost the hub: stopping the music")
+				c.stop()
+			}
 		case data := <-msgCh:
 			c.handleInboundMessage(data)
 		}
@@ -230,6 +242,10 @@ func (c *Coordinator) transportReadLoop() {
 }
 
 func (c *Coordinator) handleInboundMessage(data []byte) {
+	if c.hubMode() {
+		c.handleHubMessage(data)
+		return
+	}
 	var base protocol.BaseMessage
 	if err := json.Unmarshal(data, &base); err != nil {
 		c.log.Debug("Unrecognized JSON payload", "raw", string(data))
@@ -251,17 +267,11 @@ func (c *Coordinator) handleInboundMessage(data []byte) {
 
 	case "orbit_pause":
 		c.log.Info("Received orbit_pause command")
-		c.stateMu.Lock()
-		c.wantPaused = true
-		c.stateMu.Unlock()
-		_ = c.player.Pause()
+		c.pause()
 
 	case "orbit_resume":
 		c.log.Info("Received orbit_resume command")
-		c.stateMu.Lock()
-		c.wantPaused = false
-		c.stateMu.Unlock()
-		_ = c.player.Resume()
+		c.resume()
 
 	case "orbit_seek":
 		var seek protocol.OrbitSeekMsg
@@ -279,17 +289,36 @@ func (c *Coordinator) handleInboundMessage(data []byte) {
 
 	case "orbit_stop":
 		c.log.Info("Received orbit_stop command")
-		c.stateMu.Lock()
-		c.playGen++ // a resolve still running is dropped
-		c.pendingID = ""
-		c.wantPaused = false
-		c.currentState = protocol.StateIdle
-		c.stateMu.Unlock()
-		_ = c.player.Stop()
+		c.stop()
 
 	default:
 		c.log.Debug("Ignored inbound command", "cmd", base.Cmd)
 	}
+}
+
+// pause and resume also apply to a play still resolving (once it loads).
+func (c *Coordinator) pause() {
+	c.stateMu.Lock()
+	c.wantPaused = true
+	c.stateMu.Unlock()
+	_ = c.player.Pause()
+}
+
+func (c *Coordinator) resume() {
+	c.stateMu.Lock()
+	c.wantPaused = false
+	c.stateMu.Unlock()
+	_ = c.player.Resume()
+}
+
+func (c *Coordinator) stop() {
+	c.stateMu.Lock()
+	c.playGen++ // a resolve still running is dropped
+	c.pendingID = ""
+	c.wantPaused = false
+	c.currentState = protocol.StateIdle
+	c.stateMu.Unlock()
+	_ = c.player.Stop()
 }
 
 func (c *Coordinator) telemetryLoop() {
@@ -330,6 +359,10 @@ func (c *Coordinator) emitTelemetryReport() {
 	}
 	c.stateMu.RUnlock()
 
+	if c.hubMode() {
+		c.hubReport(vid, status.State, status.PositionMs, status.DurationMs)
+		return
+	}
 	rep := protocol.OrbitReportMsg{
 		Cmd:         "orbit_report",
 		SatelliteID: c.cfg.SatelliteID,
@@ -348,6 +381,10 @@ func (c *Coordinator) emitTelemetryReport() {
 
 func (c *Coordinator) sendEvent(eventType, videoID, msg string) {
 	if c.transport == nil {
+		return
+	}
+	if c.hubMode() {
+		c.hubEvent(eventType, videoID, msg)
 		return
 	}
 	evt := protocol.OrbitEventMsg{
