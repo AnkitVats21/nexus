@@ -580,3 +580,77 @@ func TestArgon2SemaphoreHTTP503(t *testing.T) {
 		t.Fatalf("expected 503 Service Unavailable when argon2 is busy, got %d", res.StatusCode)
 	}
 }
+
+func TestAPIProxyWritesOriginCheck(t *testing.T) {
+	h, srv, cleanup := newAuthTestHub(t)
+	defer cleanup()
+
+	// Initial setup to get valid session cookie
+	setupBody := `{"setup_code":"` + h.auth.SetupCode() + `","username":"admin","display_name":"Admin","password":"admin-password123"}`
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/hub/api/setup", strings.NewReader(setupBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", srv.URL)
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	var sessCookie *http.Cookie
+	for _, c := range res.Cookies() {
+		if c.Name == auth.SessionCookieName {
+			sessCookie = c
+			break
+		}
+	}
+	if sessCookie == nil {
+		t.Fatal("expected session cookie from setup")
+	}
+
+	// 1. GET /api/status without Origin: allowed through (no CSRF check for GET), returns 503 board offline
+	req, _ = http.NewRequest(http.MethodGet, srv.URL+"/api/status", nil)
+	req.AddCookie(sessCookie)
+	res, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET /api/status failed: %v", err)
+	}
+	if res.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 for GET without Origin, got %d", res.StatusCode)
+	}
+
+	// 2. POST /api/ota with session cookie but MISSING Origin and Referer: 403 Forbidden
+	req, _ = http.NewRequest(http.MethodPost, srv.URL+"/api/ota", strings.NewReader("binary-data"))
+	req.AddCookie(sessCookie)
+	req.Header.Set("Content-Type", "application/octet-stream")
+	res, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST /api/ota failed: %v", err)
+	}
+	if res.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 for POST without Origin/Referer, got %d", res.StatusCode)
+	}
+
+	// 3. POST /api/ota with session cookie and MISMATCHED Origin: 403 Forbidden
+	req, _ = http.NewRequest(http.MethodPost, srv.URL+"/api/ota", strings.NewReader("binary-data"))
+	req.AddCookie(sessCookie)
+	req.Header.Set("Content-Type", "application/octet-stream")
+	req.Header.Set("Origin", "http://evil.com")
+	res, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST /api/ota failed: %v", err)
+	}
+	if res.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 for POST with mismatched Origin, got %d", res.StatusCode)
+	}
+
+	// 4. POST /api/ota with session cookie, non-JSON Content-Type, and MATCHING Origin: accepted (proceeds to proxy, returning 503 board offline)
+	req, _ = http.NewRequest(http.MethodPost, srv.URL+"/api/ota", strings.NewReader("binary-data"))
+	req.AddCookie(sessCookie)
+	req.Header.Set("Content-Type", "application/octet-stream")
+	req.Header.Set("Origin", srv.URL)
+	res, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST /api/ota failed: %v", err)
+	}
+	if res.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 board offline for valid POST /api/ota, got %d", res.StatusCode)
+	}
+}

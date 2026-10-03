@@ -682,6 +682,22 @@ func (h *Hub) serveAPI(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
+
+		switch r.Method {
+		case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
+			origin := r.Header.Get("Origin")
+			if origin == "" {
+				origin = r.Header.Get("Referer")
+			}
+			if origin == "" {
+				writeError(w, http.StatusForbidden, "csrf: missing origin or referer")
+				return
+			}
+			if !auth.MatchOrigin(origin, r.Host, h.cfg.PublicURL, h.cfg.AllowedOrigins) {
+				writeError(w, http.StatusForbidden, "csrf: origin mismatch")
+				return
+			}
+		}
 	}
 	h.mu.Lock()
 	b := h.board
