@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { useAuth } from '../AuthContext';
 import { Card, PageHeader, Field, Button, Banner } from '@nexus/ui';
 import { ShieldCheck, ArrowRight } from 'lucide-react';
+import { MIN_PASSWORD_LEN } from '../constants';
 
 export function Setup({ onNavigate }) {
   const { setupAdmin } = useAuth();
@@ -25,8 +26,8 @@ export function Setup({ onNavigate }) {
       setError('Username is required');
       return;
     }
-    if (password.length < 8) {
-      setError('Password must be at least 8 characters');
+    if (password.length < MIN_PASSWORD_LEN) {
+      setError(`Password must be at least ${MIN_PASSWORD_LEN} characters`);
       return;
     }
     if (password !== confirmPassword) {
@@ -97,7 +98,7 @@ export function Setup({ onNavigate }) {
             />
           </Field>
 
-          <Field label="Admin Password" hint="At least 8 characters">
+          <Field label="Admin Password" hint={`At least ${MIN_PASSWORD_LEN} characters`}>
             <input
               type="password"
               required

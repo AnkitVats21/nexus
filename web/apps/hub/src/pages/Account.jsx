@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { useAuth } from '../AuthContext';
 import { Card, PageHeader, Field, Button, Banner, Pill } from '@nexus/ui';
 import { KeyRound, LogOut, CheckCircle2 } from 'lucide-react';
+import { MIN_PASSWORD_LEN } from '../constants';
 
 export function Account({ onNavigate }) {
   const { user, updatePassword, logout } = useAuth();
@@ -17,8 +18,8 @@ export function Account({ onNavigate }) {
     setError(null);
     setSuccess(false);
 
-    if (newPass.length < 8) {
-      setError('New password must be at least 8 characters');
+    if (newPass.length < MIN_PASSWORD_LEN) {
+      setError(`New password must be at least ${MIN_PASSWORD_LEN} characters`);
       return;
     }
     if (newPass !== confirmPass) {
@@ -94,7 +95,7 @@ export function Account({ onNavigate }) {
               />
             </Field>
 
-            <Field label="New Password" hint="At least 8 characters">
+            <Field label="New Password" hint={`At least ${MIN_PASSWORD_LEN} characters`}>
               <input
                 type="password"
                 required
