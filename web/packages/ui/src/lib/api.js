@@ -325,6 +325,11 @@ export const writeTextFile = (path, text) =>
   request(`/api/files/upload?${q({ path })}`, { method: 'POST', body: text, headers: { 'Content-Type': 'text/plain' } });
 export const deleteFile = (path) => request(`/api/files?${q({ path })}`, { method: 'DELETE' });
 
+// ── Hub Link ───────────────────────────────────────────────────────────────
+
+export const getHubStatus = () => request('/api/hub');
+export const setHubConfig = (cfg) => request('/api/hub', { method: 'POST', json: cfg });
+
 // ── System ─────────────────────────────────────────────────────────────────
 
 export const getMetrics = () => request('/api/system/metrics');

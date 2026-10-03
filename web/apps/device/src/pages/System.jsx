@@ -1,12 +1,13 @@
 import React, { useEffect, useRef, useState } from 'react';
 import clsx from 'clsx';
 import {
-  Cpu, Wifi, HardDrive, Package, Globe, Power, Terminal, Upload, RotateCcw, Pause, Play, Trash2, Link2, MemoryStick,
+  Cpu, Wifi, HardDrive, Package, Globe, Power, Terminal, Upload, RotateCcw, Pause, Play, Trash2, Link2, MemoryStick, Radio, KeyRound,
 } from 'lucide-react';
 import {
   Banner, Button, Card, Meter, PageHeader, Pill, Row, Stat,
   useToast,
   getFirmwareStatus, getFlashInfo, getFrontendStatus, getLogs, getMetrics, getStorageInfo, isDeviceBuild, reboot, rollbackFrontend, uploadFirmware,
+  getHubStatus, setHubConfig,
   formatBytes, formatUptime, signalLabel,
 } from '@nexus/ui';
 import { useNexus } from '../DeviceContext';
@@ -70,6 +71,82 @@ function Network() {
         )}
       </Card>
     </>
+  );
+}
+
+function HubCard() {
+  const toast = useToast();
+  const { data: hub, refresh } = usePoll(getHubStatus, 5000);
+  const [pairCode, setPairCode] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const handlePair = async (e) => {
+    e.preventDefault();
+    const code = pairCode.trim();
+    if (!code) return;
+    setBusy(true);
+    try {
+      await setHubConfig({ pair_code: code });
+      toast('Pairing code sent; connecting to hub…');
+      setPairCode('');
+      refresh();
+    } catch (err) {
+      toast(`Pairing failed: ${err.message}`, 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Card title="Hub" icon={Radio}>
+      {!hub ? (
+        <div className="loading" />
+      ) : !hub.compiled ? (
+        <Banner tone="neutral">Hub link support is not enabled in this firmware build.</Banner>
+      ) : (
+        <>
+          <div className="kv">
+            <Row label="Status">
+              {hub.up ? (
+                <Pill tone="ok">Connected</Pill>
+              ) : hub.connected ? (
+                <Pill tone="warn">Connecting…</Pill>
+              ) : (
+                <Pill tone="neutral">Disconnected</Pill>
+              )}
+            </Row>
+            <Row label="Pairing">
+              {hub.paired ? (
+                <Pill tone="ok">Paired</Pill>
+              ) : hub.has_token ? (
+                <Pill tone="warn">Legacy token</Pill>
+              ) : (
+                <Pill tone="neutral">Unpaired</Pill>
+              )}
+            </Row>
+            {hub.owner && <Row label="Owner">{hub.owner}</Row>}
+            {hub.url && <Row label="Address">{hub.url}{hub.from_mdns ? ' (mDNS)' : ''}</Row>}
+            {hub.hub_version && <Row label="Version">{hub.hub_version}</Row>}
+            {hub.last_error && <Row label="Error">{hub.last_error}</Row>}
+          </div>
+
+          <form className="inline-row" onSubmit={handlePair} style={{ marginTop: 12 }}>
+            <div className="input-icon grow">
+              <KeyRound size={16} />
+              <input
+                value={pairCode}
+                onChange={(e) => setPairCode(e.target.value)}
+                placeholder="Pairing code (e.g. 482-913)"
+                aria-label="Pairing code"
+              />
+            </div>
+            <Button type="submit" variant="primary" busy={busy} disabled={!pairCode.trim()}>
+              Pair
+            </Button>
+          </form>
+        </>
+      )}
+    </Card>
   );
 }
 
@@ -412,6 +489,7 @@ export default function System() {
         </div>
         <div className="stack">
           <Network />
+          <HubCard />
           <Flash />
           <WebApp />
         </div>
