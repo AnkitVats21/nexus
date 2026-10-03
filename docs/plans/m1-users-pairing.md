@@ -182,15 +182,19 @@ The token is a secret: never logged, never in a URL, compared by hash only.
 
 - Settings: `POST /api/hub` takes `pair_code` (6 digits) next to `url`. The
   code is kept in RAM only until it is used or rejected; it is not stored.
-- `HubLink` hello: `token` when it has a device token, else `pair_code` if
-  one was given, else neither (the hub rejects: `last_error` says
+- `HubLink` hello: when a pair code is set, hello carries `pair_code` and NOT
+  the token (the pair code takes priority over any stored or legacy token; the
+  hub checks pair_code first anyway). When no pair code is set, hello carries
+  `token` if one is stored, else neither (the hub rejects: `last_error` says
   "pairing required" and the link waits for a settings change, as after any
   `rejected`).
-- On `claimed`: save the token where the hub token is kept today (NVS,
-  `credentials` component), drop the pair code, carry on (no reconnect
+- On `claimed`: save the new device token where the hub token is kept today
+  (NVS, `credentials` component), drop the pair code, carry on (no reconnect
   needed).
 - `GET /api/hub`: adds `paired` (bool), `owner` (name from the welcome),
   never the token.
+- `rejected` with "bad code": keep the stored token unchanged (only the pair
+  code is cleared) so a legacy board keeps working after a typo.
 - `rejected` with "bad token" (device removed on the hub): clear the stored
   token so the person can pair again; log it.
 - Standalone mode is untouched.
