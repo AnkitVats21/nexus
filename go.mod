@@ -1,4 +1,4 @@
-module nexus-orbit
+module nexus
 
 go 1.25.4
 
@@ -8,8 +8,8 @@ require (
 )
 
 require (
-	github.com/google/jsonschema-go v0.4.3 // indirect
-	github.com/modelcontextprotocol/go-sdk v1.8.0 // indirect
+	github.com/google/jsonschema-go v0.4.3
+	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/segmentio/asm v1.1.3 // indirect
 	github.com/segmentio/encoding v0.5.4 // indirect
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
@@ -19,12 +19,9 @@ require (
 )
 
 require (
-	github.com/AnkitVats21/nexus-mcp v0.0.0
 	github.com/cenkalti/backoff v2.2.1+incompatible // indirect
 	github.com/miekg/dns v1.1.27 // indirect
 	golang.org/x/crypto v0.55.0 // indirect
 	golang.org/x/net v0.58.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 )
-
-replace github.com/AnkitVats21/nexus-mcp => ../nexus-mcp

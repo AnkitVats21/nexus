@@ -12,7 +12,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/AnkitVats21/nexus-mcp/tools"
+	"nexus/pkg/tools"
 )
 
 func main() {

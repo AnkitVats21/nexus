@@ -8,7 +8,7 @@ import (
 	"log/slog"
 	"strings"
 
-	"github.com/AnkitVats21/nexus-mcp/tools"
+	"nexus/pkg/tools"
 )
 
 // Tools is what the voice session and the music lookups use to run tools:

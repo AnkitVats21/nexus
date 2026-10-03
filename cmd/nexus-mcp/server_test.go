@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/AnkitVats21/nexus-mcp/tools"
+	"nexus/pkg/tools"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 

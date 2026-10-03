@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"strings"
 
-	"nexus-orbit/pkg/protocol"
-	"nexus-orbit/pkg/resolver"
+	"nexus/pkg/protocol"
+	"nexus/pkg/resolver"
 )
 
 // Hub mode (--hub): Orbit is an edge of nexus-hub with the player role

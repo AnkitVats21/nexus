@@ -13,7 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"nexus-orbit/pkg/protocol"
+	"nexus/pkg/protocol"
 )
 
 type mpvRequest struct {

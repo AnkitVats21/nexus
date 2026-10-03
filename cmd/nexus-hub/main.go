@@ -7,7 +7,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"github.com/AnkitVats21/nexus-mcp/tools"
+	"nexus/pkg/tools"
 	"log/slog"
 	"net"
 	"net/http"
@@ -19,7 +19,7 @@ import (
 	"time"
 
 	"github.com/grandcat/zeroconf"
-	"nexus-orbit/pkg/hub"
+	"nexus/pkg/hub"
 )
 
 const version = "0.1.0"

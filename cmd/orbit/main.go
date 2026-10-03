@@ -10,11 +10,11 @@ import (
 	"syscall"
 	"time"
 
-	"nexus-orbit/config"
-	"nexus-orbit/pkg/audio"
-	"nexus-orbit/pkg/coordinator"
-	"nexus-orbit/pkg/resolver"
-	"nexus-orbit/pkg/transport"
+	"nexus/config"
+	"nexus/pkg/audio"
+	"nexus/pkg/coordinator"
+	"nexus/pkg/resolver"
+	"nexus/pkg/transport"
 )
 
 func main() {

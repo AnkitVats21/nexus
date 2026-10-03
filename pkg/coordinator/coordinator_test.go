@@ -7,10 +7,10 @@ import (
 	"testing"
 	"time"
 
-	"nexus-orbit/config"
-	"nexus-orbit/pkg/audio"
-	"nexus-orbit/pkg/protocol"
-	"nexus-orbit/pkg/resolver"
+	"nexus/config"
+	"nexus/pkg/audio"
+	"nexus/pkg/protocol"
+	"nexus/pkg/resolver"
 )
 
 type mockPlayer struct {

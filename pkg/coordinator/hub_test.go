@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"nexus-orbit/config"
-	"nexus-orbit/pkg/protocol"
-	"nexus-orbit/pkg/resolver"
+	"nexus/config"
+	"nexus/pkg/protocol"
+	"nexus/pkg/resolver"
 )
 
 // Hub mode: hello with the player role, the hub's URL played as sent, and

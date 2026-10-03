@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/AnkitVats21/nexus-mcp/tools"
+	"nexus/pkg/tools"
 )
 
 // fakeTools records the calls it gets.

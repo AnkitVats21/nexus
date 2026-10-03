@@ -8,11 +8,11 @@ import (
 	"sync"
 	"time"
 
-	"nexus-orbit/config"
-	"nexus-orbit/pkg/audio"
-	"nexus-orbit/pkg/protocol"
-	"nexus-orbit/pkg/resolver"
-	"nexus-orbit/pkg/transport"
+	"nexus/config"
+	"nexus/pkg/audio"
+	"nexus/pkg/protocol"
+	"nexus/pkg/resolver"
+	"nexus/pkg/transport"
 )
 
 // Coordinator orchestrates Transport, Resolver, and Audio Engine.

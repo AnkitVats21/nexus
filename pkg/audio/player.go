@@ -1,6 +1,6 @@
 package audio
 
-import "nexus-orbit/pkg/protocol"
+import "nexus/pkg/protocol"
 
 // PlayerStatus represents the current audio playback state.
 type PlayerStatus struct {

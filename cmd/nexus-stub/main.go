@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
-	"nexus-orbit/pkg/protocol"
+	"nexus/pkg/protocol"
 )
 
 //go:embed index.html
