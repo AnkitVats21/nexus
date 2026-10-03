@@ -1,9 +1,18 @@
 package auth
 
 import (
+	"net"
+	"strings"
 	"sync"
 	"time"
 )
+
+func cleanIP(ip string) string {
+	if host, _, err := net.SplitHostPort(ip); err == nil {
+		return host
+	}
+	return strings.TrimSpace(ip)
+}
 
 const (
 	LoginWindow      = 15 * time.Minute
@@ -56,7 +65,7 @@ func (rl *RateLimiter) LoginAllowed(username, ip string) bool {
 
 	now := time.Now()
 	uKey := "u:" + username
-	ipKey := "ip:" + ip
+	ipKey := "ip:" + cleanIP(ip)
 
 	rl.loginFailures[uKey] = pruneTimestamps(rl.loginFailures[uKey], LoginWindow, now)
 	if len(rl.loginFailures[uKey]) >= LoginMaxFailures {
@@ -78,7 +87,7 @@ func (rl *RateLimiter) RecordLoginFailure(username, ip string) {
 
 	now := time.Now()
 	uKey := "u:" + username
-	ipKey := "ip:" + ip
+	ipKey := "ip:" + cleanIP(ip)
 
 	rl.loginFailures[uKey] = append(pruneTimestamps(rl.loginFailures[uKey], LoginWindow, now), now)
 	rl.loginFailures[ipKey] = append(pruneTimestamps(rl.loginFailures[ipKey], LoginWindow, now), now)
@@ -90,7 +99,7 @@ func (rl *RateLimiter) ResetLoginFailures(username, ip string) {
 	defer rl.mu.Unlock()
 
 	delete(rl.loginFailures, "u:"+username)
-	delete(rl.loginFailures, "ip:"+ip)
+	delete(rl.loginFailures, "ip:"+cleanIP(ip))
 }
 
 // SetupCodeAllowed checks if an IP is allowed to attempt the setup code.
@@ -99,6 +108,7 @@ func (rl *RateLimiter) SetupCodeAllowed(ip string) bool {
 	defer rl.mu.Unlock()
 
 	now := time.Now()
+	ip = cleanIP(ip)
 	rl.setupFailures[ip] = pruneTimestamps(rl.setupFailures[ip], SetupWindow, now)
 	return len(rl.setupFailures[ip]) < SetupMaxFailures
 }
@@ -109,6 +119,7 @@ func (rl *RateLimiter) RecordSetupFailure(ip string) {
 	defer rl.mu.Unlock()
 
 	now := time.Now()
+	ip = cleanIP(ip)
 	rl.setupFailures[ip] = append(pruneTimestamps(rl.setupFailures[ip], SetupWindow, now), now)
 }
 
@@ -117,7 +128,7 @@ func (rl *RateLimiter) ResetSetupFailures(ip string) {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 
-	delete(rl.setupFailures, ip)
+	delete(rl.setupFailures, cleanIP(ip))
 }
 
 // PairingCodeAllowed checks if an IP and the global threshold permit pairing code attempts.
@@ -126,6 +137,7 @@ func (rl *RateLimiter) PairingCodeAllowed(ip string) bool {
 	defer rl.mu.Unlock()
 
 	now := time.Now()
+	ip = cleanIP(ip)
 	rl.pairingFailures[ip] = pruneTimestamps(rl.pairingFailures[ip], PairingWindow, now)
 	if len(rl.pairingFailures[ip]) >= PairingIPMaxFailures {
 		return false
@@ -141,6 +153,7 @@ func (rl *RateLimiter) RecordPairingFailure(ip string) {
 	defer rl.mu.Unlock()
 
 	now := time.Now()
+	ip = cleanIP(ip)
 	rl.pairingFailures[ip] = append(pruneTimestamps(rl.pairingFailures[ip], PairingWindow, now), now)
 	rl.globalPairing = append(pruneTimestamps(rl.globalPairing, PairingWindow, now), now)
 }

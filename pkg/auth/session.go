@@ -96,7 +96,12 @@ func IsSecureRequest(r *http.Request, trustedProxy string) bool {
 		host = r.RemoteAddr
 	}
 
-	if host == trustedProxy {
+	tpHost, _, err := net.SplitHostPort(trustedProxy)
+	if err != nil {
+		tpHost = strings.TrimSpace(trustedProxy)
+	}
+
+	if host == tpHost {
 		proto := strings.ToLower(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")))
 		return proto == "https"
 	}

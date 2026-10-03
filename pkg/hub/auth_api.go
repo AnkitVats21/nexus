@@ -148,7 +148,7 @@ func (h *Hub) handleSetupPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ip := r.RemoteAddr
+	ip := auth.ClientIP(r, h.cfg.TrustedProxy)
 	u, token, expiresAt, err := h.auth.Setup(r.Context(), req.SetupCode, req.Username, req.DisplayName, req.Password, r.UserAgent(), ip)
 	if err != nil {
 		if err == auth.ErrTooManyAttempts {
@@ -193,7 +193,7 @@ func (h *Hub) handleLoginPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ip := r.RemoteAddr
+	ip := auth.ClientIP(r, h.cfg.TrustedProxy)
 	u, token, expiresAt, err := h.auth.Login(r.Context(), req.Username, req.Password, r.UserAgent(), ip)
 	if err != nil {
 		writeError(w, http.StatusUnauthorized, "invalid username or password")

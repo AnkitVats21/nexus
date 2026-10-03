@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"net"
 	"nexus/pkg/store"
 	"strings"
 	"sync"
@@ -126,6 +127,9 @@ func (s *Service) PublicURL() string {
 
 // Setup creates the initial admin user and returns a new session.
 func (s *Service) Setup(ctx context.Context, setupCode, username, displayName, password, userAgent, ip string) (*store.User, string, time.Time, error) {
+	if host, _, err := net.SplitHostPort(ip); err == nil {
+		ip = host
+	}
 	if !s.rateLimiter.SetupCodeAllowed(ip) {
 		return nil, "", time.Time{}, ErrTooManyAttempts
 	}
@@ -193,6 +197,9 @@ func (s *Service) Setup(ctx context.Context, setupCode, username, displayName, p
 
 // Login validates user credentials and establishes a new session.
 func (s *Service) Login(ctx context.Context, username, password, userAgent, ip string) (*store.User, string, time.Time, error) {
+	if host, _, err := net.SplitHostPort(ip); err == nil {
+		ip = host
+	}
 	if !s.rateLimiter.LoginAllowed(username, ip) {
 		return nil, "", time.Time{}, ErrInvalidCredentials
 	}

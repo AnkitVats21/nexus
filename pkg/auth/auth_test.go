@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"nexus/pkg/store"
@@ -285,5 +286,44 @@ func TestCSRFValidation(t *testing.T) {
 	req.Header.Set("Origin", "https://hub.example.com")
 	if err := ValidateCSRF(req, "https://hub.example.com"); err != nil {
 		t.Fatalf("expected publicURL Origin to pass, got %v", err)
+	}
+}
+
+func TestClientIPAndRateLimitPorts(t *testing.T) {
+	// 1. ClientIP port stripping and XFF behavior
+	r1 := httptest.NewRequest(http.MethodPost, "/hub/api/login", nil)
+	r1.RemoteAddr = "192.168.1.50:12345"
+	if ip := ClientIP(r1, ""); ip != "192.168.1.50" {
+		t.Fatalf("expected 192.168.1.50, got %s", ip)
+	}
+
+	// XFF ignored from non-trusted proxy
+	r1.Header.Set("X-Forwarded-For", "203.0.113.195")
+	if ip := ClientIP(r1, "127.0.0.1"); ip != "192.168.1.50" {
+		t.Fatalf("expected 192.168.1.50, got %s", ip)
+	}
+
+	// XFF honored from trusted proxy (last address in chain)
+	r2 := httptest.NewRequest(http.MethodPost, "/hub/api/login", nil)
+	r2.RemoteAddr = "127.0.0.1:45678"
+	r2.Header.Set("X-Forwarded-For", "198.51.100.1, 203.0.113.195:8080")
+	if ip := ClientIP(r2, "127.0.0.1"); ip != "203.0.113.195" {
+		t.Fatalf("expected 203.0.113.195, got %s", ip)
+	}
+
+	// 2. Different ports from same host share rate-limiting bucket
+	rl := NewRateLimiter()
+	for i := 0; i < LoginMaxFailures; i++ {
+		rl.RecordLoginFailure(fmt.Sprintf("user-%d", i), fmt.Sprintf("192.168.1.100:%d", 10000+i))
+	}
+
+	// Another connection from the same host on a different port must be locked out
+	if rl.LoginAllowed("new-user", "192.168.1.100:9999") {
+		t.Fatalf("expected 192.168.1.100:9999 to be locked out due to shared IP bucket")
+	}
+
+	// Connection from a different host must still be allowed
+	if !rl.LoginAllowed("new-user", "192.168.1.101:9999") {
+		t.Fatalf("expected 192.168.1.101:9999 to be allowed")
 	}
 }
