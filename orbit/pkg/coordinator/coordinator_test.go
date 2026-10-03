@@ -47,7 +47,7 @@ func (m *mockPlayer) Resume() error {
 	m.status.State = protocol.StatePlaying
 	return nil
 }
-func (m *mockPlayer) Seek(posMs int64) error {
+func (m *mockPlayer) SeekTo(posMs int64) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.seekPos = posMs

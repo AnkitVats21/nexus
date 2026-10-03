@@ -166,7 +166,7 @@ func (c *MPVIPCClient) Resume() error {
 	return err
 }
 
-func (c *MPVIPCClient) Seek(posMs int64) error {
+func (c *MPVIPCClient) SeekTo(posMs int64) error {
 	posSecs := float64(posMs) / 1000.0
 	c.log.Debug("Seeking mpv playback", "posMs", posMs, "posSecs", posSecs)
 	_, err := c.sendCommand("seek", posSecs, "absolute")

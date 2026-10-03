@@ -15,7 +15,7 @@ type AudioPlayer interface {
 	LoadURL(url string, startPosMs int64) error
 	Pause() error
 	Resume() error
-	Seek(posMs int64) error
+	SeekTo(posMs int64) error
 	SetVolume(vol int) error
 	SetMediaTitle(title, artist string) error
 	Stop() error

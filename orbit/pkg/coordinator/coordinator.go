@@ -277,7 +277,7 @@ func (c *Coordinator) handleInboundMessage(data []byte) {
 		var seek protocol.OrbitSeekMsg
 		if err := json.Unmarshal(data, &seek); err == nil {
 			c.log.Info("Received orbit_seek command", "posMs", seek.PositionMs)
-			_ = c.player.Seek(seek.PositionMs)
+			_ = c.player.SeekTo(seek.PositionMs)
 		}
 
 	case "orbit_volume":

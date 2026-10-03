@@ -91,7 +91,7 @@ func (c *Coordinator) handleHubMessage(data []byte) {
 			PositionMs int64 `json:"position_ms"`
 		}
 		if json.Unmarshal(data, &m) == nil {
-			_ = c.player.Seek(m.PositionMs)
+			_ = c.player.SeekTo(m.PositionMs)
 		}
 	}
 }
