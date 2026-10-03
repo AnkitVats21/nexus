@@ -513,3 +513,76 @@ func TestGenerateTempPassword(t *testing.T) {
 		t.Fatalf("expected 100 unique passwords, got %d", len(seen))
 	}
 }
+
+func TestPairingHelpersAndPepper(t *testing.T) {
+	// 1. Code generation
+	code := GeneratePairingCode()
+	if len(code) != 7 || code[3] != '-' {
+		t.Fatalf("unexpected pairing code format: %s", code)
+	}
+	clean := NormalizePairingCode(code)
+	if len(clean) != 6 {
+		t.Fatalf("expected 6 normalized digits, got %s", clean)
+	}
+
+	// 2. Pepper loading and mode 0600
+	dir, err := os.MkdirTemp("", "pepper-test-*")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	defer os.RemoveAll(dir)
+
+	pepperFile := filepath.Join(dir, "pairing_pepper")
+	p1, err := LoadOrCreatePepper(pepperFile)
+	if err != nil {
+		t.Fatalf("LoadOrCreatePepper: %v", err)
+	}
+	if len(p1) != 32 {
+		t.Fatalf("expected 32-byte pepper, got %d", len(p1))
+	}
+
+	// Check file mode 0600
+	info, err := os.Stat(pepperFile)
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	if info.Mode().Perm() != 0600 {
+		t.Fatalf("expected file perm 0600, got %o", info.Mode().Perm())
+	}
+
+	// Reload pepper
+	p2, err := LoadOrCreatePepper(pepperFile)
+	if err != nil {
+		t.Fatalf("reload pepper: %v", err)
+	}
+	if string(p1) != string(p2) {
+		t.Fatal("expected reloaded pepper to match original")
+	}
+
+	// In-memory pepper
+	pMem, err := LoadOrCreatePepper("")
+	if err != nil || len(pMem) != 32 {
+		t.Fatalf("in-memory pepper failed: err=%v, len=%d", err, len(pMem))
+	}
+
+	// 3. HashPairingCode
+	h1 := HashPairingCode(p1, "482-913")
+	h2 := HashPairingCode(p1, "482913")
+	if h1 != h2 {
+		t.Fatalf("expected identical hash for normalized code")
+	}
+	hDiff := HashPairingCode(p1, "482-914")
+	if h1 == hDiff {
+		t.Fatalf("expected different hash for different code")
+	}
+
+	// 4. Device token generation
+	tok := GenerateDeviceToken()
+	if len(tok) == 0 {
+		t.Fatal("empty device token")
+	}
+	tokHash := HashDeviceToken(tok)
+	if tokHash == [32]byte{} {
+		t.Fatal("zero token hash")
+	}
+}
