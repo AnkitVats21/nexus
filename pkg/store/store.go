@@ -491,3 +491,367 @@ func (s *Store) DeleteExpiredSessions(ctx context.Context) error {
 	_, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE expires_at <= ?`, now)
 	return err
 }
+
+// --- Devices ---
+
+// UpsertDevice inserts a new device or updates an existing device if its ID already exists (e.g. re-pairing).
+func (s *Store) UpsertDevice(ctx context.Context, d *Device) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := time.Now().UTC().Unix()
+	if d.CreatedAt == 0 {
+		d.CreatedAt = now
+	}
+
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO devices (id, owner_id, name, kind, token_hash, created_at, last_seen, last_fw)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			owner_id = excluded.owner_id,
+			name = excluded.name,
+			kind = excluded.kind,
+			token_hash = excluded.token_hash,
+			last_seen = excluded.last_seen,
+			last_fw = excluded.last_fw
+	`, d.ID, d.OwnerID, d.Name, d.Kind, d.TokenHash[:], d.CreatedAt, d.LastSeen, d.LastFW)
+	if err != nil {
+		return fmt.Errorf("upsert device: %w", err)
+	}
+	return nil
+}
+
+// GetDeviceByID retrieves a device by its ID.
+func (s *Store) GetDeviceByID(ctx context.Context, id string) (*Device, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var d Device
+	var tokenHash []byte
+	var lastSeen sql.NullInt64
+	var lastFW sql.NullString
+
+	row := s.db.QueryRowContext(ctx, `
+		SELECT id, owner_id, name, kind, token_hash, created_at, last_seen, last_fw
+		FROM devices
+		WHERE id = ?
+	`, id)
+	err := row.Scan(&d.ID, &d.OwnerID, &d.Name, &d.Kind, &tokenHash, &d.CreatedAt, &lastSeen, &lastFW)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get device by id: %w", err)
+	}
+	copy(d.TokenHash[:], tokenHash)
+	if lastSeen.Valid {
+		d.LastSeen = lastSeen.Int64
+	}
+	if lastFW.Valid {
+		d.LastFW = lastFW.String
+	}
+	return &d, nil
+}
+
+// GetDeviceByTokenHash retrieves a device by sha256 token hash.
+func (s *Store) GetDeviceByTokenHash(ctx context.Context, tokenHash [32]byte) (*Device, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var d Device
+	var hashBytes []byte
+	var lastSeen sql.NullInt64
+	var lastFW sql.NullString
+
+	row := s.db.QueryRowContext(ctx, `
+		SELECT id, owner_id, name, kind, token_hash, created_at, last_seen, last_fw
+		FROM devices
+		WHERE token_hash = ?
+	`, tokenHash[:])
+	err := row.Scan(&d.ID, &d.OwnerID, &d.Name, &d.Kind, &hashBytes, &d.CreatedAt, &lastSeen, &lastFW)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get device by token hash: %w", err)
+	}
+	copy(d.TokenHash[:], hashBytes)
+	if lastSeen.Valid {
+		d.LastSeen = lastSeen.Int64
+	}
+	if lastFW.Valid {
+		d.LastFW = lastFW.String
+	}
+	return &d, nil
+}
+
+// ListDevicesForUser lists all devices owned by a specific user.
+func (s *Store) ListDevicesForUser(ctx context.Context, userID int64) ([]*Device, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, owner_id, name, kind, token_hash, created_at, last_seen, last_fw
+		FROM devices
+		WHERE owner_id = ?
+		ORDER BY created_at ASC
+	`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("list devices for user: %w", err)
+	}
+	defer rows.Close()
+
+	var devices []*Device
+	for rows.Next() {
+		var d Device
+		var hashBytes []byte
+		var lastSeen sql.NullInt64
+		var lastFW sql.NullString
+		if err := rows.Scan(&d.ID, &d.OwnerID, &d.Name, &d.Kind, &hashBytes, &d.CreatedAt, &lastSeen, &lastFW); err != nil {
+			return nil, fmt.Errorf("scan device: %w", err)
+		}
+		copy(d.TokenHash[:], hashBytes)
+		if lastSeen.Valid {
+			d.LastSeen = lastSeen.Int64
+		}
+		if lastFW.Valid {
+			d.LastFW = lastFW.String
+		}
+		devices = append(devices, &d)
+	}
+	return devices, rows.Err()
+}
+
+// ListAllDevices lists all devices across all users (for admin view).
+func (s *Store) ListAllDevices(ctx context.Context) ([]*Device, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, owner_id, name, kind, token_hash, created_at, last_seen, last_fw
+		FROM devices
+		ORDER BY created_at ASC
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("list all devices: %w", err)
+	}
+	defer rows.Close()
+
+	var devices []*Device
+	for rows.Next() {
+		var d Device
+		var hashBytes []byte
+		var lastSeen sql.NullInt64
+		var lastFW sql.NullString
+		if err := rows.Scan(&d.ID, &d.OwnerID, &d.Name, &d.Kind, &hashBytes, &d.CreatedAt, &lastSeen, &lastFW); err != nil {
+			return nil, fmt.Errorf("scan device: %w", err)
+		}
+		copy(d.TokenHash[:], hashBytes)
+		if lastSeen.Valid {
+			d.LastSeen = lastSeen.Int64
+		}
+		if lastFW.Valid {
+			d.LastFW = lastFW.String
+		}
+		devices = append(devices, &d)
+	}
+	return devices, rows.Err()
+}
+
+// UpdateDeviceName updates the friendly name of a device.
+func (s *Store) UpdateDeviceName(ctx context.Context, id string, name string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	res, err := s.db.ExecContext(ctx, `UPDATE devices SET name = ? WHERE id = ?`, name, id)
+	if err != nil {
+		return fmt.Errorf("update device name: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("rows affected: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// UpdateDeviceLastSeen updates the last_seen timestamp and last_fw for a device.
+func (s *Store) UpdateDeviceLastSeen(ctx context.Context, id string, lastSeen int64, fw string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, err := s.db.ExecContext(ctx, `UPDATE devices SET last_seen = ?, last_fw = ? WHERE id = ?`, lastSeen, fw, id)
+	return err
+}
+
+// DeleteDevice deletes a device by its ID.
+func (s *Store) DeleteDevice(ctx context.Context, id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	res, err := s.db.ExecContext(ctx, `DELETE FROM devices WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("delete device: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("rows affected: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// --- Pairing Codes ---
+
+// CreatePairingCode stores a new one-time pairing code.
+func (s *Store) CreatePairingCode(ctx context.Context, pc *PairingCode) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := time.Now().UTC().Unix()
+	if pc.CreatedAt == 0 {
+		pc.CreatedAt = now
+	}
+
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO pairing_codes (code_hash, user_id, expires_at, created_at)
+		VALUES (?, ?, ?, ?)
+	`, pc.CodeHash[:], pc.UserID, pc.ExpiresAt, pc.CreatedAt)
+	if err != nil {
+		return fmt.Errorf("create pairing code: %w", err)
+	}
+	return nil
+}
+
+// GetPairingCode retrieves a pairing code by its code hash.
+func (s *Store) GetPairingCode(ctx context.Context, codeHash [32]byte) (*PairingCode, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var pc PairingCode
+	var hashBytes []byte
+	row := s.db.QueryRowContext(ctx, `
+		SELECT code_hash, user_id, expires_at, created_at
+		FROM pairing_codes
+		WHERE code_hash = ?
+	`, codeHash[:])
+	err := row.Scan(&hashBytes, &pc.UserID, &pc.ExpiresAt, &pc.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get pairing code: %w", err)
+	}
+	copy(pc.CodeHash[:], hashBytes)
+	return &pc, nil
+}
+
+// CountActivePairingCodes counts non-expired pairing codes for a specific user.
+func (s *Store) CountActivePairingCodes(ctx context.Context, userID int64, now int64) (int, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var count int
+	err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM pairing_codes WHERE user_id = ? AND expires_at > ?
+	`, userID, now).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count active pairing codes: %w", err)
+	}
+	return count, nil
+}
+
+// ListActivePairingCodes returns all non-expired pairing codes for a specific user.
+func (s *Store) ListActivePairingCodes(ctx context.Context, userID int64, now int64) ([]*PairingCode, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT code_hash, user_id, expires_at, created_at
+		FROM pairing_codes
+		WHERE user_id = ? AND expires_at > ?
+		ORDER BY created_at ASC
+	`, userID, now)
+	if err != nil {
+		return nil, fmt.Errorf("list active pairing codes: %w", err)
+	}
+	defer rows.Close()
+
+	var codes []*PairingCode
+	for rows.Next() {
+		var pc PairingCode
+		var hashBytes []byte
+		if err := rows.Scan(&hashBytes, &pc.UserID, &pc.ExpiresAt, &pc.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan pairing code: %w", err)
+		}
+		copy(pc.CodeHash[:], hashBytes)
+		codes = append(codes, &pc)
+	}
+	return codes, rows.Err()
+}
+
+// DeletePairingCode deletes a pairing code by its hash.
+func (s *Store) DeletePairingCode(ctx context.Context, codeHash [32]byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	res, err := s.db.ExecContext(ctx, `DELETE FROM pairing_codes WHERE code_hash = ?`, codeHash[:])
+	if err != nil {
+		return fmt.Errorf("delete pairing code: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("rows affected: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// DeletePairingCodesForUser deletes all pairing codes for a specific user.
+func (s *Store) DeletePairingCodesForUser(ctx context.Context, userID int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, err := s.db.ExecContext(ctx, `DELETE FROM pairing_codes WHERE user_id = ?`, userID)
+	return err
+}
+
+// DeleteExpiredPairingCodes deletes all expired pairing codes.
+func (s *Store) DeleteExpiredPairingCodes(ctx context.Context, now int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, err := s.db.ExecContext(ctx, `DELETE FROM pairing_codes WHERE expires_at <= ?`, now)
+	return err
+}
+
+// GetFirstAdmin returns the first created admin user (for legacy device ownership).
+func (s *Store) GetFirstAdmin(ctx context.Context) (*User, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var u User
+	var mustChange int
+	row := s.db.QueryRowContext(ctx, `
+		SELECT id, username, display_name, role, pass_hash, must_change, created_at, updated_at
+		FROM users
+		WHERE role = 'admin'
+		ORDER BY id ASC
+		LIMIT 1
+	`)
+	err := row.Scan(&u.ID, &u.Username, &u.DisplayName, &u.Role, &u.PassHash, &mustChange, &u.CreatedAt, &u.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get first admin: %w", err)
+	}
+	u.MustChange = (mustChange != 0)
+	return &u, nil
+}

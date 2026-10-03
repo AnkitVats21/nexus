@@ -256,3 +256,198 @@ func TestStoreExpiredSessions(t *testing.T) {
 		t.Fatalf("DeleteExpiredSessions: %v", err)
 	}
 }
+
+func TestStoreDevices(t *testing.T) {
+	s, cleanup := newTestStore(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	// 1. Create admin and member
+	admin := &User{Username: "admin", DisplayName: "Admin", Role: "admin", PassHash: "h1"}
+	if err := s.CreateUser(ctx, admin); err != nil {
+		t.Fatalf("CreateUser admin: %v", err)
+	}
+	member := &User{Username: "member", DisplayName: "Member", Role: "member", PassHash: "h2"}
+	if err := s.CreateUser(ctx, member); err != nil {
+		t.Fatalf("CreateUser member: %v", err)
+	}
+
+	// Verify GetFirstAdmin
+	firstAdmin, err := s.GetFirstAdmin(ctx)
+	if err != nil || firstAdmin.ID != admin.ID {
+		t.Fatalf("GetFirstAdmin: %v, got %+v", err, firstAdmin)
+	}
+
+	// 2. Upsert device for admin
+	tokHash1 := sha256.Sum256([]byte("token-device-1"))
+	d1 := &Device{
+		ID:        "nexus-001",
+		OwnerID:   admin.ID,
+		Name:      "Kitchen Speaker",
+		Kind:      "esp32-s3",
+		TokenHash: tokHash1,
+	}
+	if err := s.UpsertDevice(ctx, d1); err != nil {
+		t.Fatalf("UpsertDevice: %v", err)
+	}
+
+	// 3. GetDeviceByID
+	got, err := s.GetDeviceByID(ctx, "nexus-001")
+	if err != nil {
+		t.Fatalf("GetDeviceByID: %v", err)
+	}
+	if got.Name != "Kitchen Speaker" || got.OwnerID != admin.ID || got.TokenHash != tokHash1 {
+		t.Fatalf("unexpected device: %+v", got)
+	}
+
+	// 4. GetDeviceByTokenHash
+	gotTok, err := s.GetDeviceByTokenHash(ctx, tokHash1)
+	if err != nil || gotTok.ID != "nexus-001" {
+		t.Fatalf("GetDeviceByTokenHash: %v, got %+v", err, gotTok)
+	}
+
+	// 5. UpdateDeviceName & UpdateDeviceLastSeen
+	if err := s.UpdateDeviceName(ctx, "nexus-001", "Living Room"); err != nil {
+		t.Fatalf("UpdateDeviceName: %v", err)
+	}
+	now := time.Now().UTC().Unix()
+	if err := s.UpdateDeviceLastSeen(ctx, "nexus-001", now, "1.4.0"); err != nil {
+		t.Fatalf("UpdateDeviceLastSeen: %v", err)
+	}
+	gotUpdated, err := s.GetDeviceByID(ctx, "nexus-001")
+	if err != nil || gotUpdated.Name != "Living Room" || gotUpdated.LastFW != "1.4.0" || gotUpdated.LastSeen != now {
+		t.Fatalf("unexpected updated device: %+v", gotUpdated)
+	}
+
+	// 6. Re-claim device by member (new owner, new token)
+	tokHash2 := sha256.Sum256([]byte("token-device-reclaimed"))
+	dReclaim := &Device{
+		ID:        "nexus-001",
+		OwnerID:   member.ID,
+		Name:      "Member Speaker",
+		Kind:      "esp32-s3",
+		TokenHash: tokHash2,
+	}
+	if err := s.UpsertDevice(ctx, dReclaim); err != nil {
+		t.Fatalf("UpsertDevice re-claim: %v", err)
+	}
+	gotReclaimed, err := s.GetDeviceByID(ctx, "nexus-001")
+	if err != nil || gotReclaimed.OwnerID != member.ID || gotReclaimed.TokenHash != tokHash2 {
+		t.Fatalf("re-claim failed: %+v", gotReclaimed)
+	}
+
+	// 7. ListDevicesForUser & ListAllDevices
+	adminDevs, err := s.ListDevicesForUser(ctx, admin.ID)
+	if err != nil || len(adminDevs) != 0 {
+		t.Fatalf("expected 0 devices for admin, got %d", len(adminDevs))
+	}
+	memberDevs, err := s.ListDevicesForUser(ctx, member.ID)
+	if err != nil || len(memberDevs) != 1 {
+		t.Fatalf("expected 1 device for member, got %d", len(memberDevs))
+	}
+	allDevs, err := s.ListAllDevices(ctx)
+	if err != nil || len(allDevs) != 1 {
+		t.Fatalf("expected 1 device in all, got %d", len(allDevs))
+	}
+
+	// 8. DeleteDevice
+	if err := s.DeleteDevice(ctx, "nexus-001"); err != nil {
+		t.Fatalf("DeleteDevice: %v", err)
+	}
+	if _, err := s.GetDeviceByID(ctx, "nexus-001"); err != ErrNotFound {
+		t.Fatalf("expected ErrNotFound after delete, got %v", err)
+	}
+
+	// 9. Cascade delete on user delete
+	dCascade := &Device{
+		ID:        "nexus-002",
+		OwnerID:   member.ID,
+		Name:      "Bedroom",
+		Kind:      "orbit",
+		TokenHash: sha256.Sum256([]byte("orbit-tok")),
+	}
+	if err := s.UpsertDevice(ctx, dCascade); err != nil {
+		t.Fatalf("UpsertDevice cascade: %v", err)
+	}
+	if err := s.DeleteUser(ctx, member.ID); err != nil {
+		t.Fatalf("DeleteUser: %v", err)
+	}
+	if _, err := s.GetDeviceByID(ctx, "nexus-002"); err != ErrNotFound {
+		t.Fatalf("expected device to be cascade deleted with user, got %v", err)
+	}
+}
+
+func TestStorePairingCodes(t *testing.T) {
+	s, cleanup := newTestStore(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	u := &User{Username: "bob", DisplayName: "Bob", Role: "member", PassHash: "h"}
+	if err := s.CreateUser(ctx, u); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+
+	now := time.Now().UTC().Unix()
+	hash1 := sha256.Sum256([]byte("pepper+123456"))
+	hash2 := sha256.Sum256([]byte("pepper+654321"))
+	hashExp := sha256.Sum256([]byte("pepper+000000"))
+
+	pc1 := &PairingCode{CodeHash: hash1, UserID: u.ID, ExpiresAt: now + 600}
+	pc2 := &PairingCode{CodeHash: hash2, UserID: u.ID, ExpiresAt: now + 300}
+	pcExp := &PairingCode{CodeHash: hashExp, UserID: u.ID, ExpiresAt: now - 10}
+
+	if err := s.CreatePairingCode(ctx, pc1); err != nil {
+		t.Fatalf("CreatePairingCode 1: %v", err)
+	}
+	if err := s.CreatePairingCode(ctx, pc2); err != nil {
+		t.Fatalf("CreatePairingCode 2: %v", err)
+	}
+	if err := s.CreatePairingCode(ctx, pcExp); err != nil {
+		t.Fatalf("CreatePairingCode exp: %v", err)
+	}
+
+	// CountActivePairingCodes should count only unexpired
+	count, err := s.CountActivePairingCodes(ctx, u.ID, now)
+	if err != nil || count != 2 {
+		t.Fatalf("CountActivePairingCodes: err=%v, count=%d (expected 2)", err, count)
+	}
+
+	// ListActivePairingCodes
+	active, err := s.ListActivePairingCodes(ctx, u.ID, now)
+	if err != nil || len(active) != 2 {
+		t.Fatalf("ListActivePairingCodes: err=%v, len=%d (expected 2)", err, len(active))
+	}
+
+	// GetPairingCode
+	got, err := s.GetPairingCode(ctx, hash1)
+	if err != nil || got.UserID != u.ID || got.ExpiresAt != now+600 {
+		t.Fatalf("GetPairingCode: %v, got %+v", err, got)
+	}
+
+	// DeletePairingCode
+	if err := s.DeletePairingCode(ctx, hash1); err != nil {
+		t.Fatalf("DeletePairingCode: %v", err)
+	}
+	if _, err := s.GetPairingCode(ctx, hash1); err != ErrNotFound {
+		t.Fatalf("expected ErrNotFound after delete, got %v", err)
+	}
+
+	// DeleteExpiredPairingCodes
+	if err := s.DeleteExpiredPairingCodes(ctx, now); err != nil {
+		t.Fatalf("DeleteExpiredPairingCodes: %v", err)
+	}
+	if _, err := s.GetPairingCode(ctx, hashExp); err != ErrNotFound {
+		t.Fatalf("expected ErrNotFound for expired code, got %v", err)
+	}
+
+	// DeletePairingCodesForUser
+	if err := s.DeletePairingCodesForUser(ctx, u.ID); err != nil {
+		t.Fatalf("DeletePairingCodesForUser: %v", err)
+	}
+	countAfter, err := s.CountActivePairingCodes(ctx, u.ID, now)
+	if err != nil || countAfter != 0 {
+		t.Fatalf("expected 0 pairing codes after DeletePairingCodesForUser, got %d", countAfter)
+	}
+}
