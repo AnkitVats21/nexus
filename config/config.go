@@ -26,8 +26,12 @@ type Config struct {
 	LogLevel      string
 	// The hub (nexus-hub) to join as an edge ("" = talk to the board's
 	// /api/orbit/ws), and its token (the first line of the token file).
-	HubURL   string
-	HubToken string
+	HubURL         string
+	PairCode       string
+	OrbitTokenFile string
+	OrbitToken     string
+	HubTokenFile   string
+	HubToken       string
 }
 
 // LoadConfig parses flags, environment variables, and sensible defaults.
@@ -57,19 +61,46 @@ func LoadConfig() (*Config, error) {
 	flag.StringVar(&cfg.LogLevel, "log-level", getEnv("LOG_LEVEL", "info"), "Logging level (debug, info, warn, error)")
 	flag.StringVar(&cfg.HubURL, "hub", getEnv("NEXUS_HUB", ""), "Join a nexus-hub as an edge, e.g. ws://host:8380/hub/edge (default $NEXUS_HUB; empty = the board's /api/orbit/ws)")
 	home, _ := os.UserHomeDir()
-	hubTokenFile := flag.String("hub-token-file", filepath.Join(home, ".config", "nexus", "hub_tokens"), "Hub token (first line)")
+	defaultOrbitTokenFile := filepath.Join(home, ".config", "nexus", "orbit_token")
+	defaultHubTokenFile := filepath.Join(home, ".config", "nexus", "hub_tokens")
+
+	flag.StringVar(&cfg.PairCode, "pair-code", getEnv("ORBIT_PAIR_CODE", ""), "Pairing code (6 digits) to pair with the hub on first run")
+	flag.StringVar(&cfg.OrbitTokenFile, "orbit-token-file", getEnv("ORBIT_TOKEN_FILE", defaultOrbitTokenFile), "Orbit device token file path")
+	flag.StringVar(&cfg.HubTokenFile, "hub-token-file", getEnv("HUB_TOKEN_FILE", defaultHubTokenFile), "Legacy hub shared token file (first line)")
 
 	flag.Parse()
 
 	if cfg.HubURL != "" {
-		data, err := os.ReadFile(*hubTokenFile)
-		if err != nil {
-			return nil, fmt.Errorf("hub token: %w", err)
+		// 1. If OrbitTokenFile exists, read token from it
+		if data, err := os.ReadFile(cfg.OrbitTokenFile); err == nil {
+			for _, line := range strings.Split(string(data), "\n") {
+				if line = strings.TrimSpace(line); line != "" && !strings.HasPrefix(line, "#") {
+					cfg.OrbitToken = line
+					break
+				}
+			}
 		}
-		for _, line := range strings.Split(string(data), "\n") {
-			if line = strings.TrimSpace(line); line != "" && !strings.HasPrefix(line, "#") {
-				cfg.HubToken = line
-				break
+
+		// Normalize PairCode if given
+		if cfg.PairCode != "" {
+			var b strings.Builder
+			for _, r := range cfg.PairCode {
+				if r >= '0' && r <= '9' {
+					b.WriteRune(r)
+				}
+			}
+			cfg.PairCode = b.String()
+		}
+
+		// 2. If no device token found and no pair code given, use legacy hub token if available
+		if cfg.OrbitToken == "" && cfg.PairCode == "" {
+			if data, err := os.ReadFile(cfg.HubTokenFile); err == nil {
+				for _, line := range strings.Split(string(data), "\n") {
+					if line = strings.TrimSpace(line); line != "" && !strings.HasPrefix(line, "#") {
+						cfg.HubToken = line
+						break
+					}
+				}
 			}
 		}
 	}
@@ -93,6 +124,58 @@ func (c *Config) EndpointURL() string {
 		return c.HubURL
 	}
 	return fmt.Sprintf("ws://%s:%d%s", c.NexusHost, c.NexusPort, c.WSPath)
+}
+
+// SaveOrbitToken saves the device token to path with mode 0600, creating parent dir with 0700 if needed.
+// It writes atomically via a temporary file and rename.
+func SaveOrbitToken(path, token string) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return fmt.Errorf("mkdir orbit token dir: %w", err)
+	}
+	if err := os.Chmod(dir, 0700); err != nil {
+		return fmt.Errorf("chmod orbit token dir: %w", err)
+	}
+
+	tmp, err := os.CreateTemp(dir, ".orbit_token_tmp_*")
+	if err != nil {
+		return fmt.Errorf("create temp orbit token file: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer func() {
+		if tmpName != "" {
+			_ = os.Remove(tmpName)
+		}
+	}()
+
+	if err := tmp.Chmod(0600); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("chmod orbit token file: %w", err)
+	}
+	if _, err := tmp.WriteString(token + "\n"); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("write orbit token: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("sync orbit token: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close orbit token: %w", err)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return fmt.Errorf("rename orbit token: %w", err)
+	}
+	tmpName = ""
+	return nil
+}
+
+// DeleteOrbitToken removes the orbit token file at path.
+func DeleteOrbitToken(path string) error {
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
 }
 
 func defaultSocketPath() string {

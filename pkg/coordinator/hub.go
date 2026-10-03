@@ -2,8 +2,11 @@ package coordinator
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 
+	"nexus/config"
 	"nexus/pkg/protocol"
 	"nexus/pkg/resolver"
 )
@@ -14,7 +17,7 @@ import (
 // seek and stop; Orbit reports its state every second and says when a
 // track ends. Without --hub it speaks the board's /api/orbit/ws dialect.
 
-const hubProto = 2
+const hubProto = 3
 
 func (c *Coordinator) hubMode() bool { return c.cfg.HubURL != "" }
 
@@ -27,16 +30,32 @@ func (c *Coordinator) sendJSON(v any) {
 	}
 }
 
+func (c *Coordinator) orbitTokenPath() string {
+	if c.cfg.OrbitTokenFile != "" {
+		return c.cfg.OrbitTokenFile
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".config", "nexus", "orbit_token")
+}
+
 func (c *Coordinator) hubHello() {
 	c.log.Info("Joining the hub", "url", c.cfg.HubURL)
-	c.sendJSON(map[string]any{
+	hello := map[string]any{
 		"type": "hello", "proto": hubProto, "id": c.cfg.SatelliteID, "name": c.cfg.SatelliteName,
-		"kind": "orbit", "fw": "nexus-orbit", "token": c.cfg.HubToken,
+		"kind": "orbit", "fw": "nexus-orbit",
 		"roles": map[string]any{
 			// mpv plays the hub's stream URL, or resolves a video id itself.
 			"player": map[string]any{"url": true, "resolves": true, "queue_copy": false},
 		},
-	})
+	}
+	if c.cfg.OrbitToken != "" {
+		hello["token"] = c.cfg.OrbitToken
+	} else if c.cfg.PairCode != "" {
+		hello["pair_code"] = c.cfg.PairCode
+	} else if c.cfg.HubToken != "" {
+		hello["token"] = c.cfg.HubToken
+	}
+	c.sendJSON(hello)
 }
 
 func (c *Coordinator) handleHubMessage(data []byte) {
@@ -47,10 +66,35 @@ func (c *Coordinator) handleHubMessage(data []byte) {
 		return
 	}
 	switch head.Type {
+	case "claimed":
+		var m struct {
+			Token string `json:"token"`
+			Owner string `json:"owner"`
+		}
+		if json.Unmarshal(data, &m) == nil && m.Token != "" {
+			tokPath := c.orbitTokenPath()
+			if err := config.SaveOrbitToken(tokPath, m.Token); err != nil {
+				c.log.Error("Failed to save orbit token", "err", err)
+			} else {
+				c.cfg.OrbitToken = m.Token
+				c.cfg.PairCode = ""
+				c.log.Info("Paired with hub", "owner", m.Owner)
+			}
+		}
 	case "welcome":
-		c.log.Info("Joined the hub", "hub", string(data))
+		c.log.Info("Joined the hub")
 	case "rejected":
-		c.log.Error("The hub refused this satellite (token?)", "msg", string(data))
+		var m struct {
+			Reason string `json:"reason"`
+		}
+		_ = json.Unmarshal(data, &m)
+		if m.Reason == "bad token" && c.cfg.OrbitToken != "" {
+			_ = config.DeleteOrbitToken(c.orbitTokenPath())
+			c.cfg.OrbitToken = ""
+			c.log.Warn("Hub rejected device token; device must be paired again")
+		} else {
+			c.log.Error("The hub refused this satellite", "reason", m.Reason)
+		}
 	case "music_play":
 		var m struct {
 			Track struct {
