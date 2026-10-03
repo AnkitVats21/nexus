@@ -59,6 +59,8 @@ func main() {
 	cacheDir := flag.String("cache-dir", filepath.Join(home, ".cache", "nexus-hub", "music"), "songs kept for the players")
 	cacheMB := flag.Int("cache-max-mb", 2048, "music cache size (0 = no cache)")
 	dbPath := flag.String("db", filepath.Join(home, ".local", "share", "nexus", "nexus.db"), "SQLite database path")
+	legacyTokens := flag.Bool("legacy-tokens", true, "accept shared legacy tokens from --token-file (default true)")
+	pairingPepperFile := flag.String("pairing-pepper-file", filepath.Join(home, ".config", "nexus", "pairing_pepper"), "pairing pepper file path (0600)")
 	trustedProxy := flag.String("trusted-proxy", "", "trusted reverse proxy IP for HTTPS headers")
 	publicURL := flag.String("public-url", "", "public URL of the hub for CSRF and external links")
 	var allowOrigins stringSlice
@@ -166,7 +168,8 @@ func main() {
 	}
 	h, err := hub.New(hub.Config{Version: version, Tokens: tokens, WebDir: *webDir, Log: log,
 		GeminiKey: geminiKey, Uplink: *uplink, MCP: mcp, Tracks: tracks, Cache: cache,
-		DBPath: *dbPath, TrustedProxy: *trustedProxy, PublicURL: *publicURL, AllowedOrigins: allowOrigins})
+		DBPath: *dbPath, TrustedProxy: *trustedProxy, PublicURL: *publicURL, AllowedOrigins: allowOrigins,
+		LegacyTokens: legacyTokens, PairingPepperPath: *pairingPepperFile})
 	if err != nil {
 		log.Error("Failed to initialize hub", "err", err)
 		os.Exit(1)
