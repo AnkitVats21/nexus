@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"math/big"
 	"regexp"
 	"strconv"
 	"strings"
@@ -175,11 +176,13 @@ func VerifyPassword(password, encodedHash string) (bool, error) {
 func GenerateTempPassword() string {
 	const charset = "abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789"
 	b := make([]byte, 16)
-	if _, err := rand.Read(b); err != nil {
-		panic(err)
-	}
+	max := big.NewInt(int64(len(charset)))
 	for i := range b {
-		b[i] = charset[int(b[i])%len(charset)]
+		n, err := rand.Int(rand.Reader, max)
+		if err != nil {
+			panic(err)
+		}
+		b[i] = charset[n.Int64()]
 	}
 	return string(b)
 }

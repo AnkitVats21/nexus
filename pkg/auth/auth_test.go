@@ -486,3 +486,30 @@ func TestRateLimiterPruning(t *testing.T) {
 		t.Fatalf("expected all expired entries to be pruned, got %d", count)
 	}
 }
+
+func TestGenerateTempPassword(t *testing.T) {
+	const charset = "abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789"
+	validChars := make(map[rune]bool)
+	for _, r := range charset {
+		validChars[r] = true
+	}
+
+	seen := make(map[string]bool)
+	for i := 0; i < 100; i++ {
+		pw := GenerateTempPassword()
+		if len(pw) != 16 {
+			t.Fatalf("expected password length 16, got %d (%s)", len(pw), pw)
+		}
+		for _, r := range pw {
+			if !validChars[r] {
+				t.Fatalf("unexpected character %q in generated password %s", r, pw)
+			}
+		}
+		seen[pw] = true
+	}
+
+	// With 16 chars from 54 possible chars, collisions across 100 passwords should be impossible
+	if len(seen) != 100 {
+		t.Fatalf("expected 100 unique passwords, got %d", len(seen))
+	}
+}
