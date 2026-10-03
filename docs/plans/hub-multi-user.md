@@ -33,29 +33,32 @@ Rules:
 - A device has exactly one owner. Unclaimed devices belong to nobody and can
   do nothing but say hello.
 - A user sees and controls their own devices and the ones shared with them.
-- A session on a device runs as the owner unless a user switches to their
-  own account (section 6).
+- A device is bound to one user at a time, the owner unless someone
+  switched (section 6).
 
 ## 3. Claiming a device
 
 Today every edge uses one shared token. That goes away.
 
-1. A new device connects with no token, or with the hub's **claim token**
-   (a hub-wide secret printed by the hub's setup, entered once in the
-   board's settings the way the hub URL is today). The hub accepts the hello,
-   marks the device `unclaimed`, and answers only with a `welcome` that says
-   so (`"claimed": false`). No voice, music or state.
-2. Every signed-in user's dashboard shows it: "New device: Nexus (esp32-s3)".
-3. A user clicks **Claim**. The hub sends `claim_confirm` to the device:
-   - ESP board: LED pattern plus a chime; the person presses the action key
-     within 60 s.
-   - Devices without a key (Orbit, the app): the device shows a 6-digit
-     code (log line, notification, screen); the person types it in the
-     dashboard.
-4. On confirmation the hub creates the device's own token, sends it in
-   `claimed {token}`, and stores only its hash. The device saves it (NVS on
-   the board) and reconnects with it.
-5. Removing a device deletes its token; it is unclaimed on its next connect.
+Pairing works like pairing a TV with a streaming account: a one-time code
+from the user, entered at the device.
+
+1. In the dashboard the user clicks **Add device**. The hub shows a pairing
+   code (`482-913`), valid for 10 minutes, tied to that user.
+2. The person enters the hub address and the code once at the device: the
+   board's own settings page or its Wi-Fi setup portal; a flag or prompt for
+   Orbit; a screen in the app.
+3. The device connects with the code in its hello. The hub checks it, claims
+   the device into that user's account, creates the device's own token,
+   sends it in `claimed {token}` and stores only its hash. The code is used
+   up. The device saves the token (NVS on the board) and uses it from then
+   on.
+4. A hello with no valid token or code is rejected (`rejected`). There is no
+   list of unknown devices, so nothing on the internet can show up in a
+   dashboard or be claimed by mistake. No hub-wide secret exists.
+5. Optional confirmation on the board: LED pattern and a key press before
+   the claim completes.
+6. Removing a device deletes its token; it needs a new code to come back.
 
 The board keeps working without a hub (standalone mode) in every state.
 
@@ -69,7 +72,7 @@ The board keeps working without a hub (standalone mode) in every state.
 - Every API call is checked against the user: devices, music, settings and
   data of other users are not visible. The `/api/*` proxy to a board
   (`PROTOCOL.md` §6) is allowed only for users who own or share that board.
-- Admin only: users, hub settings, logs, updates, the claim token.
+- Admin only: users, hub settings, logs, updates.
 
 ## 5. Storage
 
@@ -91,11 +94,16 @@ Tables (first cut): `users`, `sessions`, `devices`, `device_shares`,
   (~13 KB). With accounts, the hub builds it from the session user's voice
   setup, memory and tools. The board sends only its own tool declarations
   (alarms, volume, recordings ...) and device facts (name, time zone).
+- **The device's current user.** Each device is bound to one user at a
+  time: the owner by default. Sessions, music started by voice and incoming
+  calls on the device follow that user.
 - **Explicit switching.** On a shared device, "it's Riya" calls a hub tool
-  `switch_user {name}`:
+  `switch_user {name}`, which binds the device to Riya:
   - Allowed only to users the device is shared with (and the owner).
-  - The rest of the session uses Riya's memory, contacts, MCP tools and
-    music. Next session starts as the owner again.
+  - Sessions use Riya's memory, contacts, MCP tools and music until someone
+    else switches, or the device goes back to its owner after a period
+    without use (setting, default 2 h). The dashboard shows who each device
+    is bound to.
   - Risk: anyone in the room can claim to be Riya. Mitigations: each user
     turns voice switching on for themselves (off by default); tools that act
     for the person (calls, messages, MCP tools marked sensitive) ask for a
@@ -123,7 +131,7 @@ Tables (first cut): `users`, `sessions`, `devices`, `device_shares`,
 | Assistant | Memory, voice setup, session history and transcripts |
 | Tools | Built-in hub tools on/off, MCP servers (add, token, test), later a registry |
 | Contacts and calls | Contacts, call history, voice messages |
-| Admin | Users, claim token, hub settings, logs, update |
+| Admin | Users, hub settings, logs, update |
 
 `web/apps/device` (the board's own dashboard) stays for standalone use.
 
@@ -132,13 +140,21 @@ Tables (first cut): `users`, `sessions`, `devices`, `device_shares`,
 | | Home (PC, Pi) | Server (Lightsail) |
 |---|---|---|
 | Devices in other homes | need remote access (below) | connect directly |
-| Music | resolved and cached at home, served on the LAN | YouTube URLs are bound to the server's IP: the hub serves every song from its cache over the internet |
+| Music | resolved and cached at home, served on the LAN | resolved only: the server never carries or caches music (below) |
 | Discovery | mDNS | the board needs the hub URL |
 | Always on | Pi yes, PC no | yes |
 
 Plan: keep it location-agnostic. Try Lightsail as the main hub first and
-measure voice delay and music start; fall back to a home hub (with a PC or
-Pi) if music over the internet is poor.
+measure voice delay; fall back to a home hub (PC or Pi) if it is poor.
+
+**Music on a server hub: resolve only.** The server never streams or caches
+music (data transfer). It only resolves a song to a stream URL. Stream URLs
+are bound to the IP that resolved them, so resolution goes out through a
+proxy in the home (arranged separately), and the players fetch the song
+straight from YouTube. The music cache then lives on the players (the
+board's SD card), not on the hub. A home hub may keep its LAN cache.
+Later, separately: devices as resolvers themselves, or as the proxy the
+server resolves through.
 
 **Remote access to a home hub:** the hub keeps a WireGuard link to Lightsail;
 Caddy on Lightsail serves `hub.<domain>` over HTTPS and forwards to the hub
@@ -149,14 +165,15 @@ service.
 
 ### 10.1 What the person does
 
-- "Call Riya": hub tool `call {contact}`. Rings Riya's devices (her own, and
-  shared ones where she turned that on). First to answer takes it.
+- "Call Riya": hub tool `call {contact}`. Rings the devices currently bound
+  to Riya (section 6), since that is where she is. First to answer takes
+  it.
 - Incoming call on a board: ring tone + LED pattern, then a short Gemini
   session: "Riya is calling. Answer?"
   - "Yes" (or the action key): connect.
   - "No": decline.
-  - "Tell her I'll call back in ten minutes": a voice message back (Gemini
-    writes it as text, or the board records the person's reply).
+  - "Send her a message": the board records the person's reply and the hub
+    delivers it as a voice message (a recording, not text).
 - No answer in 30 s: missed call, and the caller can leave a voice message
   ("leave a message" / the hub offers it).
 - Missed calls and messages: told at the next session ("You missed a call
@@ -192,9 +209,9 @@ from the phone works the same way.
 
 ## 11. Protocol changes (proto 3)
 
-- `hello`: `token` is the device token (or the claim token, or none).
+- `hello`: `token` is the device token, or `pair_code` on first connect.
 - `welcome`: `claimed` (bool), `user` (owner's display name).
-- New: `claim_confirm`, `claim_code`, `claimed`.
+- New: `claimed {token}`, optional `claim_confirm` (key press on the board).
 - `session_start`: the board sends its tool declarations and device facts
   instead of the whole setup (proto 2 boards keep sending the setup; the hub
   accepts both during the change).
@@ -215,8 +232,8 @@ standalone mode.
 
 ## 13. Open questions
 
-- Claim token or open claiming on the LAN (any device may ask to be claimed)?
-- Voice messages as text (Gemini) or as recordings by default?
-- Does a shared device ring for calls to every user it is shared with?
-- Lightsail data transfer per month with music served from the hub (measure
-  in the trial).
+- The home proxy for resolving on a server hub (arranged separately).
+
+Decided 2026-10-03: pairing code instead of a claim token (proposed, to
+confirm); voice messages are recordings; a call rings the devices bound to
+the callee; a server hub only resolves music, never carries it.
