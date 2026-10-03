@@ -287,6 +287,42 @@ func TestCSRFValidation(t *testing.T) {
 	if err := ValidateCSRF(req, "https://hub.example.com"); err != nil {
 		t.Fatalf("expected publicURL Origin to pass, got %v", err)
 	}
+
+	// POST with different port on same host: rejected (item 4: host:9999 vs host:8080)
+	req = httptest.NewRequest(http.MethodPost, "/hub/api/login", strings.NewReader(`{}`))
+	req.Host = "hub.local:8080"
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "http://hub.local:9999")
+	if err := ValidateCSRF(req, ""); err != ErrCSRFOriginMismatch {
+		t.Fatalf("expected different port to be rejected, got %v", err)
+	}
+
+	// POST with default port 80 normalized against host without port: accepted
+	req = httptest.NewRequest(http.MethodPost, "/hub/api/login", strings.NewReader(`{}`))
+	req.Host = "hub.local"
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "http://hub.local:80")
+	if err := ValidateCSRF(req, ""); err != nil {
+		t.Fatalf("expected default port 80 to match host, got %v", err)
+	}
+
+	// POST with default port 443 normalized against publicURL: accepted
+	req = httptest.NewRequest(http.MethodPost, "/hub/api/login", strings.NewReader(`{}`))
+	req.Host = "lan:8080"
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "https://hub.example.com:443")
+	if err := ValidateCSRF(req, "https://hub.example.com"); err != nil {
+		t.Fatalf("expected default port 443 to match publicURL, got %v", err)
+	}
+
+	// POST with non-default port against publicURL: rejected
+	req = httptest.NewRequest(http.MethodPost, "/hub/api/login", strings.NewReader(`{}`))
+	req.Host = "lan:8080"
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "https://hub.example.com:8443")
+	if err := ValidateCSRF(req, "https://hub.example.com"); err != ErrCSRFOriginMismatch {
+		t.Fatalf("expected mismatched port on publicURL to be rejected, got %v", err)
+	}
 }
 
 func TestClientIPAndRateLimitPorts(t *testing.T) {

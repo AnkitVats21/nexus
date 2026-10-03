@@ -3,10 +3,7 @@ package auth
 import (
 	"errors"
 	"mime"
-	"net"
 	"net/http"
-	"net/url"
-	"strings"
 )
 
 var (
@@ -42,37 +39,9 @@ func ValidateCSRF(r *http.Request, publicURL string) error {
 		return ErrCSRFMissingOrigin
 	}
 
-	u, err := url.Parse(origin)
-	if err != nil || u.Host == "" {
+	if !MatchOrigin(origin, r.Host, publicURL, nil) {
 		return ErrCSRFOriginMismatch
 	}
 
-	originHost := u.Host
-	reqHost := r.Host
-
-	if strings.EqualFold(originHost, reqHost) {
-		return nil
-	}
-
-	// Compare hostnames without port if one has port and other does not
-	originHostname := u.Hostname()
-	reqHostname, _, err := net.SplitHostPort(reqHost)
-	if err != nil {
-		reqHostname = reqHost
-	}
-	if strings.EqualFold(originHostname, reqHostname) {
-		return nil
-	}
-
-	// Compare with publicURL if configured
-	if publicURL != "" {
-		pubU, err := url.Parse(publicURL)
-		if err == nil && pubU.Host != "" {
-			if strings.EqualFold(originHost, pubU.Host) || strings.EqualFold(originHostname, pubU.Hostname()) {
-				return nil
-			}
-		}
-	}
-
-	return ErrCSRFOriginMismatch
+	return nil
 }
