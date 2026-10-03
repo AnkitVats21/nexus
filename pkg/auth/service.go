@@ -14,13 +14,13 @@ import (
 )
 
 var (
-	ErrSetupNotNeeded       = errors.New("setup already completed")
-	ErrInvalidSetupCode     = errors.New("invalid setup code")
-	ErrInvalidCredentials   = errors.New("invalid username or password")
-	ErrTooManyAttempts      = errors.New("too many attempts, please try again later")
-	ErrUnauthorized         = errors.New("unauthorized")
-	ErrAdminRequired        = errors.New("admin role required")
-	ErrCannotDeleteSelf     = errors.New("cannot delete own account")
+	ErrSetupNotNeeded        = errors.New("setup already completed")
+	ErrInvalidSetupCode      = errors.New("invalid setup code")
+	ErrInvalidCredentials    = errors.New("invalid username or password")
+	ErrTooManyAttempts       = errors.New("too many attempts, please try again later")
+	ErrUnauthorized          = errors.New("unauthorized")
+	ErrAdminRequired         = errors.New("admin role required")
+	ErrCannotDeleteSelf      = errors.New("cannot delete own account")
 	ErrCannotDeleteLastAdmin = errors.New("cannot delete last admin user")
 )
 

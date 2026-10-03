@@ -6,19 +6,19 @@ import (
 )
 
 const (
-	LoginWindow         = 15 * time.Minute
-	LoginMaxFailures    = 5
-	LoginLockout        = 15 * time.Minute
+	LoginWindow      = 15 * time.Minute
+	LoginMaxFailures = 5
+	LoginLockout     = 15 * time.Minute
 
-	SetupWindow         = 10 * time.Minute
-	SetupMaxFailures    = 10
-	SetupLockout        = 10 * time.Minute
+	SetupWindow      = 10 * time.Minute
+	SetupMaxFailures = 10
+	SetupLockout     = 10 * time.Minute
 
-	PairingWindow       = 10 * time.Minute
-	PairingIPMaxFailures = 10
+	PairingWindow            = 10 * time.Minute
+	PairingIPMaxFailures     = 10
 	PairingGlobalMaxFailures = 100
 
-	AuthMinDuration     = 300 * time.Millisecond
+	AuthMinDuration = 300 * time.Millisecond
 )
 
 // RateLimiter manages in-memory rate limiting and lockouts for authentication.

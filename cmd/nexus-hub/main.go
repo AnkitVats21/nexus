@@ -47,6 +47,9 @@ func main() {
 		"Invidious-compatible API (invidious-daemon) for music lookups, after MCP (default $NEXUS_INVIDIOUS_URL)")
 	cacheDir := flag.String("cache-dir", filepath.Join(home, ".cache", "nexus-hub", "music"), "songs kept for the players")
 	cacheMB := flag.Int("cache-max-mb", 2048, "music cache size (0 = no cache)")
+	dbPath := flag.String("db", filepath.Join(home, ".local", "share", "nexus", "nexus.db"), "SQLite database path")
+	trustedProxy := flag.String("trusted-proxy", "", "trusted reverse proxy IP for HTTPS headers")
+	publicURL := flag.String("public-url", "", "public URL of the hub for CSRF and external links")
 	debug := flag.Bool("debug", false, "debug logging")
 	flag.Parse()
 
@@ -149,7 +152,8 @@ func main() {
 		}
 	}
 	h := hub.New(hub.Config{Version: version, Tokens: tokens, WebDir: *webDir, Log: log,
-		GeminiKey: geminiKey, Uplink: *uplink, MCP: mcp, Tracks: tracks, Cache: cache})
+		GeminiKey: geminiKey, Uplink: *uplink, MCP: mcp, Tracks: tracks, Cache: cache,
+		DBPath: *dbPath, TrustedProxy: *trustedProxy, PublicURL: *publicURL})
 	srv := &http.Server{Addr: *listen, Handler: h.Handler(), ReadHeaderTimeout: 10 * time.Second}
 
 	ln, err := net.Listen("tcp", *listen)
@@ -158,6 +162,12 @@ func main() {
 		os.Exit(1)
 	}
 	port := ln.Addr().(*net.TCPAddr).Port
+
+	if h.Auth() != nil {
+		if code := h.Auth().SetupCode(); code != "" {
+			log.Info(fmt.Sprintf("First run: open http://<host>:%d/setup and use setup code %s", port, code))
+		}
+	}
 
 	if *mdns {
 		host, _ := os.Hostname()

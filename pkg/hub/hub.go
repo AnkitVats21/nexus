@@ -33,6 +33,9 @@ import (
 	"sync"
 	"time"
 
+	"nexus/pkg/auth"
+	"nexus/pkg/store"
+
 	"github.com/coder/websocket"
 )
 
@@ -79,6 +82,17 @@ type Config struct {
 	Tracks TrackSource
 	// Songs kept for the players (nil = none; they stream from YouTube).
 	Cache *MusicCache
+
+	// Database path for SQLite store (flag --db).
+	DBPath string
+	// Pre-configured Store (optional, for tests).
+	Store *store.Store
+	// Pre-configured Auth service (optional, for tests).
+	Auth *auth.Service
+	// Trusted reverse proxy IP for HTTPS headers (flag --trusted-proxy).
+	TrustedProxy string
+	// Public URL of the hub for CSRF and external links (flag --public-url).
+	PublicURL string
 }
 
 type Hub struct {
@@ -95,6 +109,9 @@ type Hub struct {
 
 	transcript *Transcript
 	voices     map[string]*voiceSession // by board id
+
+	store *store.Store
+	auth  *auth.Service
 }
 
 type edge struct {
@@ -179,7 +196,34 @@ func New(cfg Config) *Hub {
 	if cfg.Tracks != nil {
 		h.music = newMusic(h, cfg.Tracks)
 	}
+
+	if cfg.Auth != nil {
+		h.auth = cfg.Auth
+		h.store = cfg.Auth.Store()
+	} else if cfg.Store != nil {
+		h.store = cfg.Store
+		h.auth, _ = auth.NewService(h.store, cfg.TrustedProxy, cfg.PublicURL)
+	} else if cfg.DBPath != "" {
+		st, err := store.Open(cfg.DBPath)
+		if err != nil {
+			h.log.Error("Failed to open SQLite database", "path", cfg.DBPath, "err", err)
+		} else {
+			h.store = st
+			h.auth, _ = auth.NewService(st, cfg.TrustedProxy, cfg.PublicURL)
+		}
+	}
+
 	return h
+}
+
+// Store returns the storage engine attached to this Hub, or nil.
+func (h *Hub) Store() *store.Store {
+	return h.store
+}
+
+// Auth returns the authentication service attached to this Hub, or nil.
+func (h *Hub) Auth() *auth.Service {
+	return h.auth
 }
 
 // Handler serves the board endpoint, the browser socket, the API proxy and
@@ -192,6 +236,7 @@ func (h *Hub) Handler() http.Handler {
 	if h.cfg.Cache != nil {
 		mux.Handle(CachePath, h.cfg.Cache)
 	}
+	h.registerAuthRoutes(mux)
 	mux.HandleFunc("/api/ws", h.serveBrowser)
 	mux.HandleFunc("/api/", h.serveAPI)
 	mux.HandleFunc("/", h.serveWeb)
@@ -450,6 +495,13 @@ func (h *Hub) dropBoard(b *edge, err error) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func (h *Hub) serveBrowser(w http.ResponseWriter, r *http.Request) {
+	if h.auth != nil {
+		u, _, err := h.authenticate(r)
+		if err != nil || u == nil {
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+	}
 	// Same rule as the board's own /api/ws: any origin (dev builds run elsewhere).
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
 	if err != nil {
@@ -591,6 +643,13 @@ func newProxy(target *url.URL) *httputil.ReverseProxy {
 }
 
 func (h *Hub) serveAPI(w http.ResponseWriter, r *http.Request) {
+	if h.auth != nil {
+		u, _, err := h.authenticate(r)
+		if err != nil || u == nil {
+			writeError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+	}
 	h.mu.Lock()
 	b := h.board
 	h.mu.Unlock()
@@ -617,6 +676,17 @@ func (h *Hub) serveWeb(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Hub) serveStatus(w http.ResponseWriter, r *http.Request) {
+	if h.auth != nil {
+		u, _, err := h.authenticate(r)
+		if err != nil || u == nil {
+			writeError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		if u.Role != "admin" {
+			writeError(w, http.StatusForbidden, "admin role required")
+			return
+		}
+	}
 	h.mu.Lock()
 	status := map[string]any{"version": h.cfg.Version, "browsers": len(h.browsers), "voice": h.voiceEnabled(),
 		"music": h.music != nil}
