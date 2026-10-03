@@ -1,0 +1,26 @@
+{
+  "name": "waveshare-studio",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "ndb": "cp ../waveshare/tools/starc/js/ndb.js src/lib/ndb.js && python3 ../waveshare/tools/starc/starc.py db ../waveshare/schema/db/system.star ../waveshare/schema/db/recordings.star ../waveshare/schema/db/music.star --js src/lib/ndb_schema.js",
+    "bundle": "vite build --mode device && python3 ../waveshare/tools/webbundle/mkbundle.py dist -o nexus-web.bin",
+    "deploy": "vite build --mode device && python3 ../waveshare/tools/webbundle/mkbundle.py dist -o nexus-web.bin --upload http://${NEXUS_HOST:-192.168.1.14}"
+  },
+  "dependencies": {
+    "clsx": "^2.1.1",
+    "lucide-react": "^0.475.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.8",
+    "@types/react-dom": "^19.0.3",
+    "@vitejs/plugin-react": "^4.3.4",
+    "vite": "^6.1.0"
+  }
+}
