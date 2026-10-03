@@ -119,6 +119,40 @@ func (h *Hub) serveHubAPI(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+	case path == "/pairing":
+		if r.Method == http.MethodGet {
+			h.handlePairingGet(w, r)
+			return
+		}
+		if r.Method == http.MethodPost {
+			h.handlePairingPost(w, r)
+			return
+		}
+		if r.Method == http.MethodDelete {
+			h.handlePairingDelete(w, r)
+			return
+		}
+	case strings.HasPrefix(path, "/pairing/"):
+		code := strings.TrimPrefix(path, "/pairing/")
+		if r.Method == http.MethodDelete {
+			h.handlePairingCodeDelete(w, r, code)
+			return
+		}
+	case path == "/devices":
+		if r.Method == http.MethodGet {
+			h.handleDevicesGet(w, r)
+			return
+		}
+	case strings.HasPrefix(path, "/devices/"):
+		id := strings.TrimPrefix(path, "/devices/")
+		if r.Method == http.MethodPatch {
+			h.handleDevicePatch(w, r, id)
+			return
+		}
+		if r.Method == http.MethodDelete {
+			h.handleDeviceDelete(w, r, id)
+			return
+		}
 	}
 
 	http.NotFound(w, r)
@@ -521,6 +555,386 @@ func (h *Hub) handleUserDelete(w http.ResponseWriter, r *http.Request, targetID 
 	if err := h.store.DeleteUser(r.Context(), targetID); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to delete user")
 		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// /hub/api/pairing
+// ─────────────────────────────────────────────────────────────────────────────
+
+func (h *Hub) handlePairingGet(w http.ResponseWriter, r *http.Request) {
+	u, _, err := h.authenticate(r)
+	if err != nil || u == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if u.MustChange {
+		writeError(w, http.StatusForbidden, "password change required")
+		return
+	}
+
+	now := time.Now().UTC().Unix()
+	codes, err := h.auth.Store().ListActivePairingCodes(r.Context(), u.ID, now)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list pairing codes")
+		return
+	}
+	if codes == nil {
+		codes = []*store.PairingCode{}
+	}
+	writeJSON(w, http.StatusOK, codes)
+}
+
+func (h *Hub) handlePairingPost(w http.ResponseWriter, r *http.Request) {
+	if err := auth.ValidateCSRF(r, h.cfg.PublicURL); err != nil {
+		writeError(w, http.StatusForbidden, "csrf validation failed")
+		return
+	}
+
+	u, _, err := h.authenticate(r)
+	if err != nil || u == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if u.MustChange {
+		writeError(w, http.StatusForbidden, "password change required")
+		return
+	}
+
+	now := time.Now().UTC().Unix()
+	count, err := h.auth.Store().CountActivePairingCodes(r.Context(), u.ID, now)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to check active codes")
+		return
+	}
+	if count >= auth.MaxActivePairingCodes {
+		writeError(w, http.StatusBadRequest, "maximum 3 active pairing codes reached")
+		return
+	}
+
+	code := auth.GeneratePairingCode()
+	expiresAt := now + int64(auth.PairingCodeTTL.Seconds())
+	codeHash := auth.HashPairingCode(h.pairingPepper, code)
+
+	pc := &store.PairingCode{
+		CodeHash:  codeHash,
+		UserID:    u.ID,
+		ExpiresAt: expiresAt,
+		CreatedAt: now,
+	}
+	if err := h.auth.Store().CreatePairingCode(r.Context(), pc); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to create pairing code")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"code":       code,
+		"expires_at": expiresAt,
+	})
+}
+
+func (h *Hub) handlePairingDelete(w http.ResponseWriter, r *http.Request) {
+	if err := auth.ValidateCSRF(r, h.cfg.PublicURL); err != nil {
+		writeError(w, http.StatusForbidden, "csrf validation failed")
+		return
+	}
+
+	u, _, err := h.authenticate(r)
+	if err != nil || u == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if u.MustChange {
+		writeError(w, http.StatusForbidden, "password change required")
+		return
+	}
+
+	if err := h.auth.Store().DeletePairingCodesForUser(r.Context(), u.ID); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to cancel pairing codes")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func (h *Hub) handlePairingCodeDelete(w http.ResponseWriter, r *http.Request, code string) {
+	if err := auth.ValidateCSRF(r, h.cfg.PublicURL); err != nil {
+		writeError(w, http.StatusForbidden, "csrf validation failed")
+		return
+	}
+
+	u, _, err := h.authenticate(r)
+	if err != nil || u == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if u.MustChange {
+		writeError(w, http.StatusForbidden, "password change required")
+		return
+	}
+
+	clean := auth.NormalizePairingCode(code)
+	codeHash := auth.HashPairingCode(h.pairingPepper, clean)
+	pc, err := h.auth.Store().GetPairingCode(r.Context(), codeHash)
+	if err != nil || pc.UserID != u.ID {
+		writeError(w, http.StatusNotFound, "pairing code not found")
+		return
+	}
+
+	_ = h.auth.Store().DeletePairingCode(r.Context(), codeHash)
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// /hub/api/devices
+// ─────────────────────────────────────────────────────────────────────────────
+
+type deviceResponse struct {
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	Kind       string `json:"kind"`
+	Online     bool   `json:"online"`
+	FW         string `json:"fw"`
+	Roles      any    `json:"roles,omitempty"`
+	Uplink     string `json:"uplink,omitempty"`
+	LastSeen   int64  `json:"last_seen"`
+	ConnectedS int64  `json:"connected_s"`
+	Owner      string `json:"owner"`
+	Legacy     bool   `json:"legacy,omitempty"`
+}
+
+func (h *Hub) handleDevicesGet(w http.ResponseWriter, r *http.Request) {
+	u, _, err := h.authenticate(r)
+	if err != nil || u == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if u.MustChange {
+		writeError(w, http.StatusForbidden, "password change required")
+		return
+	}
+
+	var dbDevs []*store.Device
+	if u.Role == "admin" {
+		dbDevs, err = h.auth.Store().ListAllDevices(r.Context())
+	} else {
+		dbDevs, err = h.auth.Store().ListDevicesForUser(r.Context(), u.ID)
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list devices")
+		return
+	}
+
+	userMap := make(map[int64]string)
+	userMap[u.ID] = u.DisplayName
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	var result []deviceResponse
+	seen := make(map[string]bool)
+
+	for _, d := range dbDevs {
+		seen[d.ID] = true
+		ownerName := userMap[d.OwnerID]
+		if ownerName == "" {
+			if ownerUser, err := h.auth.Store().GetUserByID(r.Context(), d.OwnerID); err == nil && ownerUser != nil {
+				ownerName = ownerUser.DisplayName
+				userMap[d.OwnerID] = ownerName
+			}
+		}
+
+		resp := deviceResponse{
+			ID:       d.ID,
+			Name:     d.Name,
+			Kind:     d.Kind,
+			FW:       d.LastFW,
+			LastSeen: d.LastSeen,
+			Owner:    ownerName,
+		}
+
+		e := h.edges[d.ID]
+		if e != nil {
+			resp.Online = true
+			resp.ConnectedS = int64(time.Since(e.since).Seconds())
+			resp.Roles = e.roles
+			resp.Uplink = e.voiceUp
+			if e.fw != "" {
+				resp.FW = e.fw
+			}
+			if e.name != "" {
+				resp.Name = e.name
+			}
+			if e.isLegacyToken {
+				resp.Legacy = true
+			}
+		}
+		result = append(result, resp)
+	}
+
+	// For admin or first admin: include any connected legacy edges not in DB
+	firstAdmin, _ := h.auth.Store().GetFirstAdmin(r.Context())
+	if u.Role == "admin" || (firstAdmin != nil && u.ID == firstAdmin.ID) {
+		for id, e := range h.edges {
+			if !seen[id] && e.isLegacyToken {
+				seen[id] = true
+				adminName := ""
+				if firstAdmin != nil {
+					adminName = firstAdmin.DisplayName
+				}
+				result = append(result, deviceResponse{
+					ID:         e.id,
+					Name:       e.name,
+					Kind:       e.kind,
+					Online:     true,
+					FW:         e.fw,
+					Roles:      e.roles,
+					Uplink:     e.voiceUp,
+					LastSeen:   e.since.Unix(),
+					ConnectedS: int64(time.Since(e.since).Seconds()),
+					Owner:      adminName,
+					Legacy:     true,
+				})
+			}
+		}
+	}
+
+	if result == nil {
+		result = []deviceResponse{}
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+type patchDeviceReq struct {
+	Name string `json:"name"`
+}
+
+func (h *Hub) handleDevicePatch(w http.ResponseWriter, r *http.Request, id string) {
+	if err := auth.ValidateCSRF(r, h.cfg.PublicURL); err != nil {
+		writeError(w, http.StatusForbidden, "csrf validation failed")
+		return
+	}
+
+	u, _, err := h.authenticate(r)
+	if err != nil || u == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if u.MustChange {
+		writeError(w, http.StatusForbidden, "password change required")
+		return
+	}
+
+	var req patchDeviceReq
+	if !readJSON(w, r, &req) {
+		return
+	}
+	req.Name = strings.TrimSpace(req.Name)
+	if req.Name == "" {
+		writeError(w, http.StatusBadRequest, "name cannot be empty")
+		return
+	}
+
+	d, err := h.auth.Store().GetDeviceByID(r.Context(), id)
+	if err != nil {
+		h.mu.Lock()
+		e := h.edges[id]
+		h.mu.Unlock()
+		if e != nil && e.isLegacyToken && (u.Role == "admin" || e.ownerID == u.ID) {
+			h.mu.Lock()
+			e.name = req.Name
+			h.mu.Unlock()
+			writeJSON(w, http.StatusOK, map[string]any{"id": id, "name": req.Name})
+			return
+		}
+		writeError(w, http.StatusNotFound, "device not found")
+		return
+	}
+
+	if u.Role != "admin" && d.OwnerID != u.ID {
+		writeError(w, http.StatusForbidden, "forbidden: not device owner")
+		return
+	}
+
+	if err := h.auth.Store().UpdateDeviceName(r.Context(), id, req.Name); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to update device name")
+		return
+	}
+
+	h.mu.Lock()
+	if e := h.edges[id]; e != nil {
+		e.name = req.Name
+	}
+	h.mu.Unlock()
+
+	d.Name = req.Name
+	writeJSON(w, http.StatusOK, map[string]any{"id": d.ID, "name": d.Name})
+}
+
+func (h *Hub) handleDeviceDelete(w http.ResponseWriter, r *http.Request, id string) {
+	if err := auth.ValidateCSRF(r, h.cfg.PublicURL); err != nil {
+		writeError(w, http.StatusForbidden, "csrf validation failed")
+		return
+	}
+
+	u, _, err := h.authenticate(r)
+	if err != nil || u == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if u.MustChange {
+		writeError(w, http.StatusForbidden, "password change required")
+		return
+	}
+
+	d, err := h.auth.Store().GetDeviceByID(r.Context(), id)
+	if err != nil {
+		h.mu.Lock()
+		e := h.edges[id]
+		h.mu.Unlock()
+		if e != nil && e.isLegacyToken && (u.Role == "admin" || e.ownerID == u.ID) {
+			h.mu.Lock()
+			delete(h.edges, id)
+			if h.board == e {
+				h.board = nil
+				h.lastState = nil
+			}
+			h.mu.Unlock()
+			e.conn.Close(closeRejected, "bad token")
+			e.cancel()
+			writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+			return
+		}
+		writeError(w, http.StatusNotFound, "device not found")
+		return
+	}
+
+	if u.Role != "admin" && d.OwnerID != u.ID {
+		writeError(w, http.StatusForbidden, "forbidden: not device owner")
+		return
+	}
+
+	if err := h.auth.Store().DeleteDevice(r.Context(), id); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to delete device")
+		return
+	}
+
+	// Disconnect edge if connected
+	h.mu.Lock()
+	e := h.edges[id]
+	if e != nil {
+		delete(h.edges, id)
+		if h.board == e {
+			h.board = nil
+			h.lastState = nil
+		}
+	}
+	h.mu.Unlock()
+
+	if e != nil {
+		e.conn.Close(closeRejected, "bad token")
+		e.cancel()
 	}
 
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})

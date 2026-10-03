@@ -40,7 +40,7 @@ import (
 )
 
 const (
-	ProtocolVersion = 2
+	ProtocolVersion = 3
 	EdgePath        = "/hub/edge"
 	BoardPath       = "/hub/board" // proto 1 boards; the same endpoint
 
@@ -95,8 +95,21 @@ type Config struct {
 	PublicURL string
 	// Allowed origins for browser WebSocket connections (flag --allow-origin).
 	AllowedOrigins []string
+	// Accept shared legacy tokens from --token-file (default true).
+	LegacyTokens        *bool
+	DisableLegacyTokens bool
+	// Pairing pepper bytes or path to pairing pepper file.
+	PairingPepper     []byte
+	PairingPepperPath string
 	// Test-only: bypass database and authentication subsystem.
 	NoAuth bool
+}
+
+func (c Config) legacyTokensEnabled() bool {
+	if c.LegacyTokens != nil {
+		return *c.LegacyTokens
+	}
+	return !c.DisableLegacyTokens
 }
 
 type Hub struct {
@@ -116,25 +129,31 @@ type Hub struct {
 
 	store *store.Store
 	auth  *auth.Service
+
+	pairingPepper []byte
+	legacyLogged  map[string]bool
 }
 
 type edge struct {
-	conn    *websocket.Conn
-	send    chan []byte
-	cancel  context.CancelFunc
-	id      string
-	name    string
-	kind    string
-	fw      string
-	roles   edgeRoles
-	legacy  bool     // proto 1 hello (no roles): runs its own music
-	voiceUp string   // negotiated uplink: "opus" or "pcm"
-	apiBase *url.URL // state role only
-	base    string   // the hub as this edge reached it: "http://host:port"
-	proxy   *httputil.ReverseProxy
-	since   time.Time
-	voiceQ  *voiceQueue
-	voice   *voiceSession
+	conn          *websocket.Conn
+	send          chan []byte
+	cancel        context.CancelFunc
+	id            string
+	name          string
+	kind          string
+	fw            string
+	roles         edgeRoles
+	legacy        bool     // proto 1 hello (no roles): runs its own music
+	voiceUp       string   // negotiated uplink: "opus" or "pcm"
+	apiBase       *url.URL // state role only
+	base          string   // the hub as this edge reached it: "http://host:port"
+	proxy         *httputil.ReverseProxy
+	since         time.Time
+	voiceQ        *voiceQueue
+	voice         *voiceSession
+	ownerID       int64
+	ownerName     string
+	isLegacyToken bool
 }
 
 // edgeRoles are the roles an edge takes (docs/PROTOCOL.md section 2); nil
@@ -173,7 +192,23 @@ type helloMsg struct {
 	FW       string     `json:"fw"`
 	HTTPPort int        `json:"http_port"` // proto 1
 	Token    string     `json:"token"`
+	PairCode string     `json:"pair_code"`
 	Roles    *edgeRoles `json:"roles"`
+}
+
+func (h *Hub) logLegacyEdgeOnce(id string) {
+	h.mu.Lock()
+	if h.legacyLogged == nil {
+		h.legacyLogged = make(map[string]bool)
+	}
+	logged := h.legacyLogged[id]
+	if !logged {
+		h.legacyLogged[id] = true
+	}
+	h.mu.Unlock()
+	if !logged {
+		h.log.Info("Legacy edge connected (pair this device again)", "id", id)
+	}
 }
 
 func New(cfg Config) (*Hub, error) {
@@ -190,13 +225,28 @@ func New(cfg Config) (*Hub, error) {
 		cfg.VoiceLead = defaultVoiceLead
 	}
 	h := &Hub{
-		cfg:        cfg,
-		log:        cfg.Log.With("component", "hub"),
-		edges:      map[string]*edge{},
-		browsers:   map[*browser]struct{}{},
-		transcript: NewTranscript(),
-		voices:     map[string]*voiceSession{},
+		cfg:          cfg,
+		log:          cfg.Log.With("component", "hub"),
+		edges:        map[string]*edge{},
+		browsers:     map[*browser]struct{}{},
+		transcript:   NewTranscript(),
+		voices:       map[string]*voiceSession{},
+		legacyLogged: make(map[string]bool),
 	}
+
+	if len(cfg.PairingPepper) > 0 {
+		h.pairingPepper = cfg.PairingPepper
+	} else if cfg.PairingPepperPath != "" {
+		pepper, err := auth.LoadOrCreatePepper(cfg.PairingPepperPath)
+		if err != nil {
+			return nil, fmt.Errorf("load pairing pepper: %w", err)
+		}
+		h.pairingPepper = pepper
+	} else {
+		pepper, _ := auth.LoadOrCreatePepper("")
+		h.pairingPepper = pepper
+	}
+
 	if cfg.Tracks != nil {
 		h.music = newMusic(h, cfg.Tracks)
 	}
@@ -253,6 +303,7 @@ func (h *Hub) Handler() http.Handler {
 		mux.Handle(CachePath, h.cfg.Cache)
 	}
 	h.registerAuthRoutes(mux)
+	mux.HandleFunc("/hub/d/", h.serveDeviceProxy)
 	mux.HandleFunc("/api/ws", h.serveBrowser)
 	mux.HandleFunc("/api/", h.serveAPI)
 	mux.HandleFunc("/", h.serveWeb)
@@ -288,31 +339,153 @@ func (h *Hub) serveEdge(w http.ResponseWriter, r *http.Request) {
 		conn.Close(websocket.StatusPolicyViolation, "expected hello")
 		return
 	}
-	if !h.tokenOK(hello.Token) {
-		h.log.Warn("Edge refused: bad token", "id", hello.ID, "addr", r.RemoteAddr)
-		h.writeNow(conn, map[string]any{"type": "rejected", "reason": "bad token"})
-		conn.Close(closeRejected, "bad token")
-		return
+
+	var claimed bool
+	var ownerName string
+	var ownerID int64
+	var isLegacyToken bool
+
+	if h.auth != nil {
+		if hello.PairCode != "" {
+			// Case 2: pair_code given
+			ip := auth.ClientIP(r, h.cfg.TrustedProxy)
+			if !h.auth.RateLimiter().PairingCodeAllowed(ip) {
+				h.writeNow(conn, map[string]any{"type": "rejected", "reason": "bad code"})
+				conn.Close(closeRejected, "bad code")
+				return
+			}
+			cleanCode := auth.NormalizePairingCode(hello.PairCode)
+			if len(cleanCode) != 6 {
+				h.auth.RateLimiter().RecordPairingFailure(ip)
+				h.writeNow(conn, map[string]any{"type": "rejected", "reason": "bad code"})
+				conn.Close(closeRejected, "bad code")
+				return
+			}
+			codeHash := auth.HashPairingCode(h.pairingPepper, cleanCode)
+			pc, err := h.auth.Store().GetPairingCode(r.Context(), codeHash)
+			now := time.Now().UTC().Unix()
+			if err != nil || pc.ExpiresAt <= now {
+				h.auth.RateLimiter().RecordPairingFailure(ip)
+				h.writeNow(conn, map[string]any{"type": "rejected", "reason": "bad code"})
+				conn.Close(closeRejected, "bad code")
+				return
+			}
+
+			user, err := h.auth.Store().GetUserByID(r.Context(), pc.UserID)
+			if err != nil || user == nil {
+				h.writeNow(conn, map[string]any{"type": "rejected", "reason": "bad code"})
+				conn.Close(closeRejected, "bad code")
+				return
+			}
+
+			deviceToken := auth.GenerateDeviceToken()
+			tokHash := auth.HashDeviceToken(deviceToken)
+
+			devName := hello.Name
+			if devName == "" {
+				devName = hello.ID
+			}
+			dev := &store.Device{
+				ID:        hello.ID,
+				OwnerID:   user.ID,
+				Name:      devName,
+				Kind:      hello.Kind,
+				TokenHash: tokHash,
+				CreatedAt: now,
+				LastSeen:  now,
+				LastFW:    hello.FW,
+			}
+			if err := h.auth.Store().UpsertDevice(r.Context(), dev); err != nil {
+				h.log.Error("Failed to upsert device on pairing", "err", err)
+				conn.Close(websocket.StatusInternalError, "internal error")
+				return
+			}
+			_ = h.auth.Store().DeletePairingCode(r.Context(), codeHash)
+
+			ownerName = user.DisplayName
+			ownerID = user.ID
+			claimed = true
+
+			// Send claimed before welcome
+			claimedMsg := map[string]any{
+				"type":  "claimed",
+				"token": deviceToken,
+				"owner": ownerName,
+			}
+			if err := h.writeNow(conn, claimedMsg); err != nil {
+				conn.Close(websocket.StatusAbnormalClosure, "write claimed failed")
+				return
+			}
+		} else if hello.Token != "" {
+			// Case 1 or 4: token given
+			tokHash := auth.HashDeviceToken(hello.Token)
+			dev, err := h.auth.Store().GetDeviceByTokenHash(r.Context(), tokHash)
+			if err == nil {
+				if dev.ID != hello.ID {
+					h.writeNow(conn, map[string]any{"type": "rejected", "reason": "bad token"})
+					conn.Close(closeRejected, "bad token")
+					return
+				}
+				owner, _ := h.auth.Store().GetUserByID(r.Context(), dev.OwnerID)
+				if owner != nil {
+					ownerName = owner.DisplayName
+					ownerID = owner.ID
+				}
+				claimed = true
+				_ = h.auth.Store().UpdateDeviceLastSeen(r.Context(), dev.ID, time.Now().UTC().Unix(), hello.FW)
+			} else {
+				if h.cfg.legacyTokensEnabled() && h.tokenOK(hello.Token) {
+					isLegacyToken = true
+					firstAdmin, _ := h.auth.Store().GetFirstAdmin(r.Context())
+					if firstAdmin != nil {
+						ownerName = firstAdmin.DisplayName
+						ownerID = firstAdmin.ID
+					}
+					h.logLegacyEdgeOnce(hello.ID)
+				} else {
+					h.writeNow(conn, map[string]any{"type": "rejected", "reason": "bad token"})
+					conn.Close(closeRejected, "bad token")
+					return
+				}
+			}
+		} else {
+			// Case 3: Neither token nor pair_code given
+			h.writeNow(conn, map[string]any{"type": "rejected", "reason": "pairing required"})
+			conn.Close(closeRejected, "pairing required")
+			return
+		}
+	} else {
+		// Test NoAuth mode: fallback to tokenOK check
+		if !h.tokenOK(hello.Token) {
+			h.writeNow(conn, map[string]any{"type": "rejected", "reason": "bad token"})
+			conn.Close(closeRejected, "bad token")
+			return
+		}
 	}
 
 	roles := hello.Roles
 	if roles == nil {
-		// Proto 1: the waveshare board, voice and state.
-		roles = &edgeRoles{}
-		roles.Voice = &struct {
-			Up   []string `json:"up"`
-			Down []string `json:"down"`
-		}{}
-		roles.State = &struct {
-			HTTPPort int `json:"http_port"`
-		}{HTTPPort: hello.HTTPPort}
+		if hello.Proto <= 1 {
+			// Proto 1: the waveshare board, voice and state.
+			roles = &edgeRoles{}
+			roles.Voice = &struct {
+				Up   []string `json:"up"`
+				Down []string `json:"down"`
+			}{}
+			roles.State = &struct {
+				HTTPPort int `json:"http_port"`
+			}{HTTPPort: hello.HTTPPort}
+		} else {
+			roles = &edgeRoles{}
+		}
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	b := &edge{
 		conn: conn, send: make(chan []byte, boardQueueLen), cancel: cancel,
 		id: hello.ID, name: hello.Name, kind: hello.Kind, fw: hello.FW, roles: *roles, legacy: hello.Roles == nil,
 		since: time.Now(), voiceQ: newVoiceQueue(conn, h.cfg.VoiceLead),
-		base: "http://" + r.Host,
+		base:    "http://" + r.Host,
+		ownerID: ownerID, ownerName: ownerName, isLegacyToken: isLegacyToken,
 	}
 	if b.name == "" {
 		b.name = b.id
@@ -353,8 +526,26 @@ func (h *Hub) serveEdge(w http.ResponseWriter, r *http.Request) {
 		voice = map[string]any{"up": b.voiceUp, "down": "pcm", "down_rate": voiceRate}
 	}
 	proto := min(ProtocolVersion, max(hello.Proto, 1))
-	welcome, _ := json.Marshal(map[string]any{"type": "welcome", "hub": "nexus-hub " + h.cfg.Version,
-		"proto": proto, "voice": voice, "music": h.music != nil})
+	welcomeMap := map[string]any{
+		"type":  "welcome",
+		"hub":   "nexus-hub " + h.cfg.Version,
+		"proto": proto,
+		"voice": voice,
+		"music": h.music != nil,
+	}
+	if claimed {
+		welcomeMap["claimed"] = true
+		if ownerName != "" {
+			welcomeMap["owner"] = ownerName
+		}
+	}
+	if isLegacyToken {
+		welcomeMap["legacy"] = true
+		if ownerName != "" {
+			welcomeMap["owner"] = ownerName
+		}
+	}
+	welcome, _ := json.Marshal(welcomeMap)
 	if err := h.writeNow(conn, welcome); err != nil {
 		h.dropBoard(b, err)
 		return
@@ -539,6 +730,24 @@ func (h *Hub) serveBrowser(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, `{"error":"password change required"}`, http.StatusForbidden)
 			return
 		}
+
+		h.mu.Lock()
+		b := h.board
+		h.mu.Unlock()
+		if b != nil {
+			dev, err := h.auth.Store().GetDeviceByID(r.Context(), b.id)
+			if err == nil {
+				if dev.OwnerID != u.ID {
+					http.Error(w, `{"error":"forbidden: not device owner"}`, http.StatusForbidden)
+					return
+				}
+			} else if b.isLegacyToken {
+				if b.ownerID != u.ID {
+					http.Error(w, `{"error":"forbidden: not device owner"}`, http.StatusForbidden)
+					return
+				}
+			}
+		}
 	}
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
 	if err != nil {
@@ -679,6 +888,77 @@ func newProxy(target *url.URL) *httputil.ReverseProxy {
 	}
 }
 
+func (h *Hub) serveDeviceProxy(w http.ResponseWriter, r *http.Request) {
+	// Format: /hub/d/{id}/api/...
+	rest := strings.TrimPrefix(r.URL.Path, "/hub/d/")
+	parts := strings.SplitN(rest, "/", 2)
+	deviceID := parts[0]
+	if deviceID == "" || len(parts) < 2 {
+		http.NotFound(w, r)
+		return
+	}
+	subPath := "/" + parts[1]
+
+	if h.auth != nil {
+		u, _, err := h.authenticate(r)
+		if err != nil || u == nil {
+			writeError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		if u.MustChange {
+			writeError(w, http.StatusForbidden, "password change required")
+			return
+		}
+
+		switch r.Method {
+		case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
+			origin := r.Header.Get("Origin")
+			if origin == "" {
+				origin = r.Header.Get("Referer")
+			}
+			if origin == "" {
+				writeError(w, http.StatusForbidden, "csrf: missing origin or referer")
+				return
+			}
+			if !auth.MatchOrigin(origin, r.Host, h.cfg.PublicURL, h.cfg.AllowedOrigins) {
+				writeError(w, http.StatusForbidden, "csrf: origin mismatch")
+				return
+			}
+		}
+
+		dev, err := h.auth.Store().GetDeviceByID(r.Context(), deviceID)
+		if err != nil {
+			h.mu.Lock()
+			e := h.edges[deviceID]
+			h.mu.Unlock()
+			if e != nil && e.isLegacyToken && e.ownerID == u.ID {
+				// legacy device owned by first admin
+			} else {
+				writeError(w, http.StatusNotFound, "device not found")
+				return
+			}
+		} else if dev.OwnerID != u.ID {
+			writeError(w, http.StatusForbidden, "forbidden: not device owner")
+			return
+		}
+	}
+
+	h.mu.Lock()
+	b := h.edges[deviceID]
+	h.mu.Unlock()
+	if b == nil || b.proxy == nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		w.Write([]byte(`{"status":"error","message":"board offline"}`))
+		return
+	}
+
+	r2 := r.Clone(r.Context())
+	r2.URL.Path = subPath
+	r2.URL.RawPath = ""
+	b.proxy.ServeHTTP(w, r2)
+}
+
 func (h *Hub) serveAPI(w http.ResponseWriter, r *http.Request) {
 	if h.auth != nil {
 		u, _, err := h.authenticate(r)
@@ -706,6 +986,31 @@ func (h *Hub) serveAPI(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+
+		h.mu.Lock()
+		b := h.board
+		h.mu.Unlock()
+		if b == nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			w.Write([]byte(`{"status":"error","message":"board offline"}`))
+			return
+		}
+
+		dev, err := h.auth.Store().GetDeviceByID(r.Context(), b.id)
+		if err == nil {
+			if dev.OwnerID != u.ID {
+				writeError(w, http.StatusForbidden, "forbidden: not device owner")
+				return
+			}
+		} else if b.isLegacyToken {
+			if b.ownerID != u.ID {
+				writeError(w, http.StatusForbidden, "forbidden: not device owner")
+				return
+			}
+		}
+		b.proxy.ServeHTTP(w, r)
+		return
 	}
 	h.mu.Lock()
 	b := h.board

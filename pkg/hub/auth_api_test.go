@@ -12,6 +12,7 @@ import (
 	"nexus/pkg/store"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -787,4 +788,587 @@ func TestMustChangeEnforcement(t *testing.T) {
 		t.Fatalf("expected GET /api/status to return 503 board offline after password change, got %v status=%d", err, res.StatusCode)
 	}
 	res.Body.Close()
+}
+
+func boolPtr(b bool) *bool {
+	return &b
+}
+
+func TestPairingCodesAPI(t *testing.T) {
+	h, srv, cleanup := newAuthTestHub(t)
+	defer cleanup()
+
+	// 1. Setup admin
+	setupCode := h.Auth().SetupCode()
+	res, _ := doJSON(t, srv, http.MethodPost, "/hub/api/setup", map[string]string{
+		"setup_code":   setupCode,
+		"username":     "admin",
+		"display_name": "Admin",
+		"password":     "AdminSecret123!",
+	}, nil)
+	adminCookie := findCookie(res.Cookies(), auth.SessionCookieName)
+
+	// Create Alice (member)
+	res, body := doJSON(t, srv, http.MethodPost, "/hub/api/users", map[string]string{
+		"username":     "alice",
+		"display_name": "Alice",
+		"role":         "member",
+	}, adminCookie)
+	var created map[string]any
+	_ = json.Unmarshal(body, &created)
+	tempPass := created["temp_password"].(string)
+
+	// Login Alice and change temp password
+	res, _ = doJSON(t, srv, http.MethodPost, "/hub/api/login", map[string]string{
+		"username": "alice",
+		"password": tempPass,
+	}, nil)
+	aliceCookie := findCookie(res.Cookies(), auth.SessionCookieName)
+
+	res, _ = doJSON(t, srv, http.MethodPost, "/hub/api/me/password", map[string]string{
+		"current": tempPass,
+		"new":     "AliceSecret123!",
+	}, aliceCookie)
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 on /hub/api/me/password, got %d", res.StatusCode)
+	}
+
+	// 2. POST /hub/api/pairing unauthenticated -> 401
+	res, _ = doJSON(t, srv, http.MethodPost, "/hub/api/pairing", nil, nil)
+	if res.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected 401 unauthenticated, got %d", res.StatusCode)
+	}
+
+	// 3. Alice creates first pairing code
+	res, body = doJSON(t, srv, http.MethodPost, "/hub/api/pairing", nil, aliceCookie)
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 on /hub/api/pairing, got %d", res.StatusCode)
+	}
+	var pc1 map[string]any
+	_ = json.Unmarshal(body, &pc1)
+	code1 := pc1["code"].(string)
+	if len(code1) != 7 || code1[3] != '-' {
+		t.Fatalf("unexpected code format: %s", code1)
+	}
+
+	// Create 2 more codes (total 3)
+	res, body = doJSON(t, srv, http.MethodPost, "/hub/api/pairing", nil, aliceCookie)
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 on 2nd pairing code, got %d", res.StatusCode)
+	}
+	var pc2 map[string]any
+	_ = json.Unmarshal(body, &pc2)
+	code2 := pc2["code"].(string)
+
+	res, _ = doJSON(t, srv, http.MethodPost, "/hub/api/pairing", nil, aliceCookie)
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 on 3rd pairing code, got %d", res.StatusCode)
+	}
+
+	// 4. Try to create 4th code -> 400 Bad Request
+	res, _ = doJSON(t, srv, http.MethodPost, "/hub/api/pairing", nil, aliceCookie)
+	if res.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 on 4th pairing code, got %d", res.StatusCode)
+	}
+
+	// 5. GET /hub/api/pairing -> returns 3 active codes
+	res, body = doJSON(t, srv, http.MethodGet, "/hub/api/pairing", nil, aliceCookie)
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 on GET /hub/api/pairing, got %d", res.StatusCode)
+	}
+	var list []map[string]any
+	_ = json.Unmarshal(body, &list)
+	if len(list) != 3 {
+		t.Fatalf("expected 3 active codes, got %d", len(list))
+	}
+
+	// 6. DELETE /hub/api/pairing/{code} to cancel code2
+	res, _ = doJSON(t, srv, http.MethodDelete, "/hub/api/pairing/"+code2, nil, aliceCookie)
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 on DELETE /hub/api/pairing/{code}, got %d", res.StatusCode)
+	}
+
+	// Now Alice has 2 active codes, can create 1 more
+	res, _ = doJSON(t, srv, http.MethodPost, "/hub/api/pairing", nil, aliceCookie)
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 creating replacement code, got %d", res.StatusCode)
+	}
+
+	// 7. DELETE /hub/api/pairing -> cancels all active codes
+	res, _ = doJSON(t, srv, http.MethodDelete, "/hub/api/pairing", nil, aliceCookie)
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 on DELETE /hub/api/pairing, got %d", res.StatusCode)
+	}
+	res, body = doJSON(t, srv, http.MethodGet, "/hub/api/pairing", nil, aliceCookie)
+	_ = json.Unmarshal(body, &list)
+	if len(list) != 0 {
+		t.Fatalf("expected 0 active codes after cancel all, got %d", len(list))
+	}
+}
+
+func TestProto3EdgePairingAndLifecycle(t *testing.T) {
+	h, srv, cleanup := newAuthTestHub(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	// 1. Setup admin
+	setupCode := h.Auth().SetupCode()
+	res, _ := doJSON(t, srv, http.MethodPost, "/hub/api/setup", map[string]string{
+		"setup_code":   setupCode,
+		"username":     "admin",
+		"display_name": "Admin",
+		"password":     "AdminSecret123!",
+	}, nil)
+	adminCookie := findCookie(res.Cookies(), auth.SessionCookieName)
+
+	// Create Alice (member)
+	res, body := doJSON(t, srv, http.MethodPost, "/hub/api/users", map[string]string{
+		"username":     "alice",
+		"display_name": "Alice",
+		"role":         "member",
+	}, adminCookie)
+	var created map[string]any
+	_ = json.Unmarshal(body, &created)
+	tempPass := created["temp_password"].(string)
+
+	// Login Alice & update password
+	res, _ = doJSON(t, srv, http.MethodPost, "/hub/api/login", map[string]string{
+		"username": "alice",
+		"password": tempPass,
+	}, nil)
+	aliceCookie := findCookie(res.Cookies(), auth.SessionCookieName)
+	_, _ = doJSON(t, srv, http.MethodPost, "/hub/api/me/password", map[string]string{
+		"current": tempPass,
+		"new":     "AliceSecret123!",
+	}, aliceCookie)
+
+	// Alice gets pairing code
+	res, body = doJSON(t, srv, http.MethodPost, "/hub/api/pairing", nil, aliceCookie)
+	var pData map[string]any
+	_ = json.Unmarshal(body, &pData)
+	pairCode := pData["code"].(string)
+
+	wsBase := "ws" + strings.TrimPrefix(srv.URL, "http") + EdgePath
+
+	// 2. Case 3: Neither token nor pair_code -> rejected with "pairing required"
+	conn, _, err := websocket.Dial(ctx, wsBase, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	write(t, ctx, conn, map[string]any{"type": "hello", "proto": 3, "id": "nexus-dev-1", "name": "Kitchen", "kind": "esp32-s3"})
+	msg := read(t, ctx, conn)
+	if msg["type"] != "rejected" || msg["reason"] != "pairing required" {
+		t.Fatalf("expected rejected pairing required, got %+v", msg)
+	}
+	conn.Close(websocket.StatusNormalClosure, "")
+
+	// 3. Case 2: Wrong pair_code -> rejected with "bad code"
+	conn, _, err = websocket.Dial(ctx, wsBase, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	write(t, ctx, conn, map[string]any{"type": "hello", "proto": 3, "id": "nexus-dev-1", "name": "Kitchen", "kind": "esp32-s3", "pair_code": "000-000"})
+	msg = read(t, ctx, conn)
+	if msg["type"] != "rejected" || msg["reason"] != "bad code" {
+		t.Fatalf("expected rejected bad code, got %+v", msg)
+	}
+	conn.Close(websocket.StatusNormalClosure, "")
+
+	// 4. Case 2: Valid pair_code -> claimed + welcome
+	conn, _, err = websocket.Dial(ctx, wsBase, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	write(t, ctx, conn, map[string]any{"type": "hello", "proto": 3, "id": "nexus-dev-1", "name": "Kitchen", "kind": "esp32-s3", "pair_code": pairCode})
+	claimedMsg := read(t, ctx, conn)
+	if claimedMsg["type"] != "claimed" || claimedMsg["owner"] != "Alice" || claimedMsg["token"] == "" {
+		t.Fatalf("expected claimed message with token and owner Alice, got %+v", claimedMsg)
+	}
+	deviceToken := claimedMsg["token"].(string)
+
+	welcomeMsg := read(t, ctx, conn)
+	if welcomeMsg["type"] != "welcome" || welcomeMsg["claimed"] != true || welcomeMsg["owner"] != "Alice" {
+		t.Fatalf("expected welcome message with claimed:true and owner:Alice, got %+v", welcomeMsg)
+	}
+	conn.Close(websocket.StatusNormalClosure, "")
+
+	// 5. Code used once: same pairing code cannot be used again
+	conn, _, err = websocket.Dial(ctx, wsBase, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	write(t, ctx, conn, map[string]any{"type": "hello", "proto": 3, "id": "nexus-dev-2", "name": "Living Room", "kind": "esp32-s3", "pair_code": pairCode})
+	msg = read(t, ctx, conn)
+	if msg["type"] != "rejected" || msg["reason"] != "bad code" {
+		t.Fatalf("expected rejected bad code on re-use of consumed code, got %+v", msg)
+	}
+	conn.Close(websocket.StatusNormalClosure, "")
+
+	// 6. Case 1: Reconnect with device token
+	conn, _, err = websocket.Dial(ctx, wsBase, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	write(t, ctx, conn, map[string]any{"type": "hello", "proto": 3, "id": "nexus-dev-1", "name": "Kitchen", "kind": "esp32-s3", "token": deviceToken})
+	msg = read(t, ctx, conn)
+	if msg["type"] != "welcome" || msg["claimed"] != true || msg["owner"] != "Alice" {
+		t.Fatalf("expected welcome on reconnect with token, got %+v", msg)
+	}
+	conn.Close(websocket.StatusNormalClosure, "")
+
+	// 7. Token bound to ID: replaying token with different ID -> rejected with "bad token"
+	conn, _, err = websocket.Dial(ctx, wsBase, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	write(t, ctx, conn, map[string]any{"type": "hello", "proto": 3, "id": "nexus-dev-impostor", "name": "Kitchen", "kind": "esp32-s3", "token": deviceToken})
+	msg = read(t, ctx, conn)
+	if msg["type"] != "rejected" || msg["reason"] != "bad token" {
+		t.Fatalf("expected rejected bad token when token replayed with different id, got %+v", msg)
+	}
+	conn.Close(websocket.StatusNormalClosure, "")
+
+	// 8. Re-claim moves ownership to Bob
+	res, body = doJSON(t, srv, http.MethodPost, "/hub/api/users", map[string]string{
+		"username":     "bob",
+		"display_name": "Bob",
+		"role":         "member",
+	}, adminCookie)
+	_ = json.Unmarshal(body, &created)
+	bobTemp := created["temp_password"].(string)
+
+	res, _ = doJSON(t, srv, http.MethodPost, "/hub/api/login", map[string]string{
+		"username": "bob",
+		"password": bobTemp,
+	}, nil)
+	bobCookie := findCookie(res.Cookies(), auth.SessionCookieName)
+	_, _ = doJSON(t, srv, http.MethodPost, "/hub/api/me/password", map[string]string{
+		"current": bobTemp,
+		"new":     "BobSecret123!",
+	}, bobCookie)
+
+	// Bob creates pairing code
+	res, body = doJSON(t, srv, http.MethodPost, "/hub/api/pairing", nil, bobCookie)
+	_ = json.Unmarshal(body, &pData)
+	bobCode := pData["code"].(string)
+
+	// Re-claim nexus-dev-1 with Bob's code
+	conn, _, err = websocket.Dial(ctx, wsBase, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	write(t, ctx, conn, map[string]any{"type": "hello", "proto": 3, "id": "nexus-dev-1", "name": "Kitchen", "kind": "esp32-s3", "pair_code": bobCode})
+	claimedBob := read(t, ctx, conn)
+	if claimedBob["type"] != "claimed" || claimedBob["owner"] != "Bob" {
+		t.Fatalf("expected claimed with owner Bob, got %+v", claimedBob)
+	}
+	bobToken := claimedBob["token"].(string)
+	welcomeBob := read(t, ctx, conn)
+	if welcomeBob["type"] != "welcome" || welcomeBob["owner"] != "Bob" {
+		t.Fatalf("expected welcome with owner Bob, got %+v", welcomeBob)
+	}
+	conn.Close(websocket.StatusNormalClosure, "")
+
+	// Old Alice token is now rejected
+	conn, _, err = websocket.Dial(ctx, wsBase, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	write(t, ctx, conn, map[string]any{"type": "hello", "proto": 3, "id": "nexus-dev-1", "name": "Kitchen", "kind": "esp32-s3", "token": deviceToken})
+	msg = read(t, ctx, conn)
+	if msg["type"] != "rejected" || msg["reason"] != "bad token" {
+		t.Fatalf("expected old token rejected after re-claim, got %+v", msg)
+	}
+	conn.Close(websocket.StatusNormalClosure, "")
+
+	// New Bob token works
+	conn, _, err = websocket.Dial(ctx, wsBase, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	write(t, ctx, conn, map[string]any{"type": "hello", "proto": 3, "id": "nexus-dev-1", "name": "Kitchen", "kind": "esp32-s3", "token": bobToken})
+	msg = read(t, ctx, conn)
+	if msg["type"] != "welcome" || msg["owner"] != "Bob" {
+		t.Fatalf("expected new token to work after re-claim, got %+v", msg)
+	}
+	conn.Close(websocket.StatusNormalClosure, "")
+}
+
+func TestDeviceEndpointsAndProxyOwnership(t *testing.T) {
+	h, srv, cleanup := newAuthTestHub(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	// 1. Setup admin
+	setupCode := h.Auth().SetupCode()
+	res, _ := doJSON(t, srv, http.MethodPost, "/hub/api/setup", map[string]string{
+		"setup_code":   setupCode,
+		"username":     "admin",
+		"display_name": "Admin",
+		"password":     "AdminSecret123!",
+	}, nil)
+	adminCookie := findCookie(res.Cookies(), auth.SessionCookieName)
+
+	// Create Alice & Bob
+	res, body := doJSON(t, srv, http.MethodPost, "/hub/api/users", map[string]string{
+		"username":     "alice",
+		"display_name": "Alice",
+		"role":         "member",
+	}, adminCookie)
+	var created map[string]any
+	_ = json.Unmarshal(body, &created)
+	aliceTemp := created["temp_password"].(string)
+
+	res, _ = doJSON(t, srv, http.MethodPost, "/hub/api/login", map[string]string{"username": "alice", "password": aliceTemp}, nil)
+	aliceCookie := findCookie(res.Cookies(), auth.SessionCookieName)
+	_, _ = doJSON(t, srv, http.MethodPost, "/hub/api/me/password", map[string]string{"current": aliceTemp, "new": "AliceSecret123!"}, aliceCookie)
+
+	res, body = doJSON(t, srv, http.MethodPost, "/hub/api/users", map[string]string{
+		"username":     "bob",
+		"display_name": "Bob",
+		"role":         "member",
+	}, adminCookie)
+	_ = json.Unmarshal(body, &created)
+	bobTemp := created["temp_password"].(string)
+
+	res, _ = doJSON(t, srv, http.MethodPost, "/hub/api/login", map[string]string{"username": "bob", "password": bobTemp}, nil)
+	bobCookie := findCookie(res.Cookies(), auth.SessionCookieName)
+	_, _ = doJSON(t, srv, http.MethodPost, "/hub/api/me/password", map[string]string{"current": bobTemp, "new": "BobSecret123!"}, bobCookie)
+
+	// Alice pairs nexus-alice-1
+	res, body = doJSON(t, srv, http.MethodPost, "/hub/api/pairing", nil, aliceCookie)
+	var pData map[string]any
+	_ = json.Unmarshal(body, &pData)
+	aliceCode := pData["code"].(string)
+
+	// Mock board HTTP server
+	fakeBoardServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"board":"ok"}`))
+	}))
+	defer fakeBoardServer.Close()
+	fakeBoardPort, _ := strconv.Atoi(fakeBoardServer.URL[strings.LastIndex(fakeBoardServer.URL, ":")+1:])
+
+	wsBase := "ws" + strings.TrimPrefix(srv.URL, "http") + EdgePath
+	connAliceBoard, _, err := websocket.Dial(ctx, wsBase, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer connAliceBoard.Close(websocket.StatusNormalClosure, "")
+	write(t, ctx, connAliceBoard, map[string]any{
+		"type":      "hello",
+		"proto":     3,
+		"id":        "nexus-alice-1",
+		"name":      "Alice Speaker",
+		"kind":      "esp32-s3",
+		"pair_code": aliceCode,
+		"roles": map[string]any{
+			"state": map[string]any{"http_port": fakeBoardPort},
+		},
+	})
+	claimedAlice := read(t, ctx, connAliceBoard)
+	aliceToken := claimedAlice["token"].(string)
+	_ = read(t, ctx, connAliceBoard) // welcome
+
+	// Bob pairs nexus-bob-1
+	res, body = doJSON(t, srv, http.MethodPost, "/hub/api/pairing", nil, bobCookie)
+	_ = json.Unmarshal(body, &pData)
+	bobCode := pData["code"].(string)
+
+	connBobBoard, _, err := websocket.Dial(ctx, wsBase, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer connBobBoard.Close(websocket.StatusNormalClosure, "")
+	write(t, ctx, connBobBoard, map[string]any{
+		"type":      "hello",
+		"proto":     3,
+		"id":        "nexus-bob-1",
+		"name":      "Bob Speaker",
+		"kind":      "esp32-s3",
+		"pair_code": bobCode,
+	})
+	_ = read(t, ctx, connBobBoard) // claimed
+	_ = read(t, ctx, connBobBoard) // welcome
+
+	// 2. GET /hub/api/devices: Alice sees only hers, Bob sees only his, Admin sees all
+	res, body = doJSON(t, srv, http.MethodGet, "/hub/api/devices", nil, aliceCookie)
+	var aliceDevs []map[string]any
+	_ = json.Unmarshal(body, &aliceDevs)
+	if len(aliceDevs) != 1 || aliceDevs[0]["id"] != "nexus-alice-1" {
+		t.Fatalf("Alice should only see nexus-alice-1, got %+v", aliceDevs)
+	}
+
+	res, body = doJSON(t, srv, http.MethodGet, "/hub/api/devices", nil, bobCookie)
+	var bobDevs []map[string]any
+	_ = json.Unmarshal(body, &bobDevs)
+	if len(bobDevs) != 1 || bobDevs[0]["id"] != "nexus-bob-1" {
+		t.Fatalf("Bob should only see nexus-bob-1, got %+v", bobDevs)
+	}
+
+	res, body = doJSON(t, srv, http.MethodGet, "/hub/api/devices", nil, adminCookie)
+	var adminDevs []map[string]any
+	_ = json.Unmarshal(body, &adminDevs)
+	if len(adminDevs) != 2 {
+		t.Fatalf("Admin should see both devices, got %+v", adminDevs)
+	}
+
+	// 3. PATCH /hub/api/devices/{id}
+	// Bob tries to rename Alice's device -> 403 Forbidden
+	res, _ = doJSON(t, srv, http.MethodPatch, "/hub/api/devices/nexus-alice-1", map[string]string{"name": "Hacked"}, bobCookie)
+	if res.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 when non-owner renames device, got %d", res.StatusCode)
+	}
+
+	// Alice renames her device -> 200 OK
+	res, body = doJSON(t, srv, http.MethodPatch, "/hub/api/devices/nexus-alice-1", map[string]string{"name": "Kitchen Smart Speaker"}, aliceCookie)
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 when owner renames device, got %d", res.StatusCode)
+	}
+
+	// 4. Proxy /hub/d/{id}/api/...
+	// Bob requests Alice's board API -> 403 Forbidden
+	res, _ = doJSON(t, srv, http.MethodGet, "/hub/d/nexus-alice-1/api/state", nil, bobCookie)
+	if res.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 for non-owner accessing /hub/d/nexus-alice-1/api/state, got %d", res.StatusCode)
+	}
+
+	// Alice requests her board API -> 200 OK {"board":"ok"}
+	res, body = doJSON(t, srv, http.MethodGet, "/hub/d/nexus-alice-1/api/state", nil, aliceCookie)
+	if res.StatusCode != http.StatusOK || !strings.Contains(string(body), `"board":"ok"`) {
+		t.Fatalf("expected 200 with board ok for owner, got status=%d body=%s", res.StatusCode, string(body))
+	}
+
+	// 5. Existing /api/ proxy and /api/ws (nexus-alice-1 is h.board)
+	// Bob requests /api/state -> 403 Forbidden
+	res, _ = doJSON(t, srv, http.MethodGet, "/api/state", nil, bobCookie)
+	if res.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 for non-owner accessing /api/state, got %d", res.StatusCode)
+	}
+
+	// Alice requests /api/state -> 200 OK
+	res, _ = doJSON(t, srv, http.MethodGet, "/api/state", nil, aliceCookie)
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 for owner accessing /api/state, got %d", res.StatusCode)
+	}
+
+	// 6. DELETE /hub/api/devices/{id}
+	// Bob tries to delete Alice's device -> 403 Forbidden
+	res, _ = doJSON(t, srv, http.MethodDelete, "/hub/api/devices/nexus-alice-1", nil, bobCookie)
+	if res.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 for non-owner deleting device, got %d", res.StatusCode)
+	}
+
+	// Alice deletes her device -> 200 OK
+	res, _ = doJSON(t, srv, http.MethodDelete, "/hub/api/devices/nexus-alice-1", nil, aliceCookie)
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 for owner deleting device, got %d", res.StatusCode)
+	}
+
+	// Reconnect with deleted device's token -> rejected with "bad token"
+	connReconnect, _, err := websocket.Dial(ctx, wsBase, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	write(t, ctx, connReconnect, map[string]any{"type": "hello", "proto": 3, "id": "nexus-alice-1", "name": "Kitchen", "kind": "esp32-s3", "token": aliceToken})
+	msg := read(t, ctx, connReconnect)
+	if msg["type"] != "rejected" || msg["reason"] != "bad token" {
+		t.Fatalf("expected rejected bad token for deleted device token, got %+v", msg)
+	}
+	connReconnect.Close(websocket.StatusNormalClosure, "")
+}
+
+func TestLegacyTokensFlag(t *testing.T) {
+	ctx := context.Background()
+
+	// 1. Hub with default LegacyTokens (on)
+	dir1, err := os.MkdirTemp("", "legacy-hub-1-*")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	defer os.RemoveAll(dir1)
+
+	h1, err := New(Config{
+		Version:      "test",
+		Tokens:       []string{testToken},
+		DBPath:       filepath.Join(dir1, "hub.db"),
+		TrustedProxy: "127.0.0.1",
+		PublicURL:    "http://hub.local:8380",
+		LegacyTokens: boolPtr(true),
+	})
+	if err != nil {
+		t.Fatalf("New h1: %v", err)
+	}
+	srv1 := httptest.NewServer(h1.Handler())
+	defer srv1.Close()
+	defer h1.Store().Close()
+
+	// Setup admin on h1 so legacy edge has an owner
+	setupCode := h1.Auth().SetupCode()
+	_, _ = doJSON(t, srv1, http.MethodPost, "/hub/api/setup", map[string]string{
+		"setup_code":   setupCode,
+		"username":     "admin",
+		"display_name": "Admin User",
+		"password":     "AdminSecret123!",
+	}, nil)
+
+	// Proto 2 hello with shared token -> receives welcome with legacy: true
+	wsURL1 := "ws" + strings.TrimPrefix(srv1.URL, "http") + EdgePath
+	conn1, _, err := websocket.Dial(ctx, wsURL1, nil)
+	if err != nil {
+		t.Fatalf("dial h1: %v", err)
+	}
+	write(t, ctx, conn1, map[string]any{"type": "hello", "proto": 2, "id": "legacy-dev-1", "name": "Legacy Orbit", "kind": "orbit", "token": testToken})
+	msg1 := read(t, ctx, conn1)
+	if msg1["type"] != "welcome" || msg1["legacy"] != true {
+		t.Fatalf("expected welcome with legacy:true on h1, got %+v", msg1)
+	}
+	conn1.Close(websocket.StatusNormalClosure, "")
+
+	// 2. Hub with DisableLegacyTokens = true
+	dir2, err := os.MkdirTemp("", "legacy-hub-2-*")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	defer os.RemoveAll(dir2)
+
+	h2, err := New(Config{
+		Version:             "test",
+		Tokens:              []string{testToken},
+		DBPath:              filepath.Join(dir2, "hub.db"),
+		TrustedProxy:        "127.0.0.1",
+		PublicURL:           "http://hub.local:8380",
+		DisableLegacyTokens: true,
+	})
+	if err != nil {
+		t.Fatalf("New h2: %v", err)
+	}
+	srv2 := httptest.NewServer(h2.Handler())
+	defer srv2.Close()
+	defer h2.Store().Close()
+
+	// Setup admin on h2
+	setupCode2 := h2.Auth().SetupCode()
+	_, _ = doJSON(t, srv2, http.MethodPost, "/hub/api/setup", map[string]string{
+		"setup_code":   setupCode2,
+		"username":     "admin",
+		"display_name": "Admin User",
+		"password":     "AdminSecret123!",
+	}, nil)
+
+	// Proto 2 hello with shared token on h2 -> rejected with "bad token"
+	wsURL2 := "ws" + strings.TrimPrefix(srv2.URL, "http") + EdgePath
+	conn2, _, err := websocket.Dial(ctx, wsURL2, nil)
+	if err != nil {
+		t.Fatalf("dial h2: %v", err)
+	}
+	write(t, ctx, conn2, map[string]any{"type": "hello", "proto": 2, "id": "legacy-dev-1", "name": "Legacy Orbit", "kind": "orbit", "token": testToken})
+	msg2 := read(t, ctx, conn2)
+	if msg2["type"] != "rejected" || msg2["reason"] != "bad token" {
+		t.Fatalf("expected rejected bad token on h2 with legacy disabled, got %+v", msg2)
+	}
+	conn2.Close(websocket.StatusNormalClosure, "")
 }
