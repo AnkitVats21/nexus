@@ -273,7 +273,12 @@ phase 1 is the link and the dashboard, phase 2 voice sessions:
   tools (`_meta` `nexus/device_only`) stay hidden from Gemini either way.
   The Gemini key is read from `--gemini-key-file` at call time and goes in a
   request header only; tool errors carry no key. Startup logs the local and
-  the remote-only tool names. Build note: `go.mod` replaces the module with
+  the remote-only tool names. Remote tool declarations are refreshed in the
+  background (at startup and every 10 min) and served strictly from cache so
+  session setup never blocks the edge read loop on network. After 401/403 auth
+  failures, the client backs off for 30 minutes (or until the token file changes)
+  and logs once. An empty token disables remote MCP without network calls.
+  Build note: `go.mod` replaces the module with
   `../nexus-mcp`, so that repo must sit next to this one.
 - Music cache (`pkg/hub/cache.go`): every song the hub looks up a stream for
   is saved (downloaded with a Range header, as the board does, or YouTube

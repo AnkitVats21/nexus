@@ -7,10 +7,11 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"nexus/pkg/tools"
 	"log/slog"
 	"net"
 	"net/http"
+	"nexus/pkg/hub"
+	"nexus/pkg/tools"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -19,7 +20,6 @@ import (
 	"time"
 
 	"github.com/grandcat/zeroconf"
-	"nexus/pkg/hub"
 )
 
 const version = "0.1.0"
@@ -86,6 +86,8 @@ func main() {
 	var remote *hub.MCPClient
 	if *mcpURL != "" {
 		remote = hub.NewMCPClient(*mcpURL, readSecret(*mcpTokenFile), *mcpMaxTools, log)
+		remote.SetTokenFile(*mcpTokenFile)
+		remote.Start(context.Background())
 	}
 	var local *hub.LocalTools
 	if *localTools {

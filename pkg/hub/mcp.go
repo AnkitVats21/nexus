@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"regexp"
 	"strings"
 	"sync"
@@ -23,6 +24,7 @@ const (
 	mcpToolsMaxAge         = 10 * time.Minute
 	mcpCallTimeout         = 45 * time.Second
 	mcpProtocolVersion     = "2024-11-05"
+	mcpAuthBackoff         = 30 * time.Minute
 )
 
 var mcpToolName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_.-]{0,63}$`)
@@ -31,19 +33,29 @@ var mcpToolName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_.-]{0,63}$`)
 // is JSON or server-sent events). The hub uses it for the voice session's
 // remote tools, as the board does in direct mode.
 type MCPClient struct {
-	url      string
-	token    string
-	maxTools int
-	http     *http.Client
-	log      *slog.Logger
+	url         string
+	token       string
+	tokenFile   string
+	tokenMod    time.Time
+	maxTools    int
+	http        *http.Client
+	log         *slog.Logger
+	authBackoff time.Duration
 
-	mu        sync.Mutex
-	session   string // Mcp-Session-Id
-	inited    bool
-	nextID    int
-	tools     []mcpTool
-	toolsAt   time.Time
-	lastError string
+	mu               sync.Mutex
+	refreshMu        sync.Mutex
+	session          string // Mcp-Session-Id
+	inited           bool
+	nextID           int
+	tools            []mcpTool
+	toolsAt          time.Time
+	lastError        string
+	backoffUntil     time.Time
+	authLogged       bool
+	emptyTokenLogged bool
+
+	started bool
+	stop    chan struct{}
 }
 
 type mcpTool struct {
@@ -60,20 +72,200 @@ func NewMCPClient(url, token string, maxTools int, log *slog.Logger) *MCPClient 
 	if log == nil {
 		log = slog.Default()
 	}
-	return &MCPClient{url: url, token: token, maxTools: maxTools,
-		http: &http.Client{Timeout: mcpCallTimeout}, log: log.With("component", "mcp")}
+	return &MCPClient{
+		url:         url,
+		token:       token,
+		maxTools:    maxTools,
+		http:        &http.Client{Timeout: mcpCallTimeout},
+		log:         log.With("component", "mcp"),
+		authBackoff: mcpAuthBackoff,
+		stop:        make(chan struct{}),
+	}
+}
+
+// SetTokenFile configures a token file path. When configured, token updates
+// on disk are automatically loaded and clear any active auth backoff.
+func (c *MCPClient) SetTokenFile(path string) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.tokenFile = path
+	c.checkTokenFileLocked()
+}
+
+func (c *MCPClient) checkTokenFileLocked() {
+	if c.tokenFile == "" {
+		return
+	}
+	st, err := os.Stat(c.tokenFile)
+	if err != nil {
+		return
+	}
+	if !st.ModTime().After(c.tokenMod) && !c.tokenMod.IsZero() {
+		return
+	}
+	c.tokenMod = st.ModTime()
+	newToken := readSecretFile(c.tokenFile)
+	if newToken != c.token {
+		c.token = newToken
+		// Token changed: clear auth backoff and session so requests can re-authenticate.
+		c.backoffUntil = time.Time{}
+		c.authLogged = false
+		c.emptyTokenLogged = false
+		c.inited = false
+		c.session = ""
+		if c.token != "" {
+			c.log.Info("MCP token updated from file", "file", c.tokenFile)
+		}
+	}
+}
+
+func (c *MCPClient) currentTokenLocked() string {
+	c.checkTokenFileLocked()
+	return c.token
+}
+
+func (c *MCPClient) inBackoffLocked() bool {
+	c.checkTokenFileLocked()
+	if c.backoffUntil.IsZero() {
+		return false
+	}
+	if time.Now().After(c.backoffUntil) {
+		c.backoffUntil = time.Time{}
+		c.authLogged = false
+		return false
+	}
+	return true
+}
+
+// InBackoff reports whether the client is currently in auth backoff.
+func (c *MCPClient) InBackoff() bool {
+	if c == nil {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.inBackoffLocked()
+}
+
+// Start begins periodic background refresh of declarations (every 10 minutes).
+// The initial refresh runs asynchronously so Start never blocks callers.
+func (c *MCPClient) Start(ctx context.Context) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	if c.started {
+		c.mu.Unlock()
+		return
+	}
+	c.started = true
+	c.mu.Unlock()
+
+	go c.refreshLoop(ctx)
+}
+
+// Close stops the periodic background refresh loop.
+func (c *MCPClient) Close() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	select {
+	case <-c.stop:
+	default:
+		close(c.stop)
+	}
+}
+
+func (c *MCPClient) refreshLoop(ctx context.Context) {
+	_ = c.Refresh(ctx)
+	ticker := time.NewTicker(mcpToolsMaxAge)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-c.stop:
+			return
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			_ = c.Refresh(ctx)
+		}
+	}
+}
+
+// Refresh fetches and updates the cached tool list from the remote MCP server.
+// If the client is in auth backoff or has no token, it skips the network call.
+func (c *MCPClient) Refresh(ctx context.Context) error {
+	if c == nil {
+		return nil
+	}
+	c.refreshMu.Lock()
+	defer c.refreshMu.Unlock()
+
+	c.mu.Lock()
+	if c.inBackoffLocked() {
+		c.mu.Unlock()
+		return errors.New("MCP auth backoff active")
+	}
+	if c.currentTokenLocked() == "" {
+		if !c.emptyTokenLogged {
+			c.emptyTokenLogged = true
+			if c.tokenFile != "" {
+				c.log.Info("Remote MCP disabled: no token found", "file", c.tokenFile)
+			} else {
+				c.log.Info("Remote MCP disabled: no token configured")
+			}
+		}
+		c.mu.Unlock()
+		return errors.New("remote MCP disabled: no token")
+	}
+	// Return cached list if recently updated.
+	if len(c.tools) > 0 && time.Since(c.toolsAt) < 5*time.Second {
+		c.mu.Unlock()
+		return nil
+	}
+	c.mu.Unlock()
+
+	res, err := c.rpc(ctx, "tools/list", json.RawMessage("{}"))
+	if err != nil {
+		c.mu.Lock()
+		logged := c.authLogged
+		c.mu.Unlock()
+		if !logged {
+			c.log.Warn("MCP tools unavailable", "err", err)
+		}
+		return err
+	}
+	var list struct {
+		Tools []mcpTool `json:"tools"`
+	}
+	if err := json.Unmarshal(res, &list); err != nil {
+		return fmt.Errorf("tools/list: %w", err)
+	}
+	c.mu.Lock()
+	c.tools = list.Tools
+	c.toolsAt = time.Now()
+	c.mu.Unlock()
+	c.log.Info("MCP tools listed", "count", len(list.Tools))
+	return nil
 }
 
 // Declarations are the MCP tools as Gemini function declarations: device-only
 // tools, names in skip and (with builtin search) web_search left out, then
-// the board's limits on count and size. The tool list is cached.
+// the board's limits on count and size. Declarations are served strictly from
+// the in-memory cache and never block on network requests.
 func (c *MCPClient) Declarations(ctx context.Context, skip map[string]bool, builtinSearch bool) []map[string]any {
 	if c == nil {
 		return nil
 	}
-	tools, err := c.listTools(ctx)
-	if err != nil {
-		c.log.Warn("MCP tools unavailable", "err", err)
+	c.mu.Lock()
+	tools := c.tools
+	c.mu.Unlock()
+	if len(tools) == 0 {
 		return nil
 	}
 	return buildDeclarations(tools, skip, builtinSearch, c.maxTools)
@@ -130,14 +322,20 @@ func (c *MCPClient) Has(name string) bool {
 	return false
 }
 
-// ToolNames lists the server's tool names (the cached list, or fetched).
+// ToolNames lists the server's tool names (from cache, or refreshed if empty).
 func (c *MCPClient) ToolNames(ctx context.Context) []string {
 	if c == nil {
 		return nil
 	}
-	tools, err := c.listTools(ctx)
-	if err != nil {
-		return nil
+	c.mu.Lock()
+	tools := c.tools
+	c.mu.Unlock()
+	if len(tools) == 0 {
+		if err := c.Refresh(ctx); err == nil {
+			c.mu.Lock()
+			tools = c.tools
+			c.mu.Unlock()
+		}
 	}
 	names := make([]string, 0, len(tools))
 	for _, t := range tools {
@@ -152,6 +350,25 @@ func (c *MCPClient) Call(ctx context.Context, name string, args json.RawMessage)
 	if c == nil {
 		return toolError("no MCP server")
 	}
+	c.mu.Lock()
+	if c.inBackoffLocked() {
+		c.mu.Unlock()
+		return toolError("MCP auth backoff active")
+	}
+	if c.currentTokenLocked() == "" {
+		if !c.emptyTokenLogged {
+			c.emptyTokenLogged = true
+			if c.tokenFile != "" {
+				c.log.Info("Remote MCP disabled: no token found", "file", c.tokenFile)
+			} else {
+				c.log.Info("Remote MCP disabled: no token configured")
+			}
+		}
+		c.mu.Unlock()
+		return toolError("remote MCP disabled: no token")
+	}
+	c.mu.Unlock()
+
 	if len(args) == 0 || string(args) == "null" {
 		args = json.RawMessage("{}")
 	}
@@ -169,6 +386,25 @@ func (c *MCPClient) CallStructured(ctx context.Context, name string, args json.R
 	if c == nil {
 		return errors.New("no MCP server")
 	}
+	c.mu.Lock()
+	if c.inBackoffLocked() {
+		c.mu.Unlock()
+		return errors.New("MCP auth backoff active")
+	}
+	if c.currentTokenLocked() == "" {
+		if !c.emptyTokenLogged {
+			c.emptyTokenLogged = true
+			if c.tokenFile != "" {
+				c.log.Info("Remote MCP disabled: no token found", "file", c.tokenFile)
+			} else {
+				c.log.Info("Remote MCP disabled: no token configured")
+			}
+		}
+		c.mu.Unlock()
+		return errors.New("remote MCP disabled: no token")
+	}
+	c.mu.Unlock()
+
 	params, _ := json.Marshal(map[string]any{"name": name, "arguments": args})
 	res, err := c.rpc(ctx, "tools/call", params)
 	if err != nil {
@@ -197,38 +433,6 @@ func (c *MCPClient) CallStructured(ctx context.Context, name string, args json.R
 	return json.Unmarshal(r.StructuredContent, out)
 }
 
-func (c *MCPClient) listTools(ctx context.Context) ([]mcpTool, error) {
-	c.mu.Lock()
-	if c.tools != nil && time.Since(c.toolsAt) < mcpToolsMaxAge {
-		tools := c.tools
-		c.mu.Unlock()
-		return tools, nil
-	}
-	c.mu.Unlock()
-	res, err := c.rpc(ctx, "tools/list", json.RawMessage("{}"))
-	if err != nil {
-		c.mu.Lock()
-		tools := c.tools // a stale list beats none
-		c.mu.Unlock()
-		if tools != nil {
-			return tools, nil
-		}
-		return nil, err
-	}
-	var list struct {
-		Tools []mcpTool `json:"tools"`
-	}
-	if err := json.Unmarshal(res, &list); err != nil {
-		return nil, fmt.Errorf("tools/list: %w", err)
-	}
-	c.mu.Lock()
-	c.tools = list.Tools
-	c.toolsAt = time.Now()
-	c.mu.Unlock()
-	c.log.Info("MCP tools listed", "count", len(list.Tools))
-	return list.Tools, nil
-}
-
 // rpc sends one request (initializing the session first, and again once if
 // the server has forgotten it) and returns its "result".
 func (c *MCPClient) rpc(ctx context.Context, method string, params json.RawMessage) (json.RawMessage, error) {
@@ -237,6 +441,9 @@ func (c *MCPClient) rpc(ctx context.Context, method string, params json.RawMessa
 			return nil, err
 		}
 		res, status, err := c.post(ctx, method, params, true)
+		if status == http.StatusUnauthorized || status == http.StatusForbidden {
+			return nil, err
+		}
 		if status == http.StatusNotFound {
 			c.mu.Lock()
 			c.inited = false
@@ -273,12 +480,30 @@ func (c *MCPClient) ensureInit(ctx context.Context) error {
 }
 
 func (c *MCPClient) post(ctx context.Context, method string, params json.RawMessage, withID bool) (json.RawMessage, int, error) {
-	req := map[string]any{"jsonrpc": "2.0", "method": method}
 	c.mu.Lock()
+	if c.inBackoffLocked() {
+		c.mu.Unlock()
+		return nil, 0, errors.New("MCP auth backoff active")
+	}
+	token := c.currentTokenLocked()
+	if token == "" {
+		if !c.emptyTokenLogged {
+			c.emptyTokenLogged = true
+			if c.tokenFile != "" {
+				c.log.Info("Remote MCP disabled: no token found", "file", c.tokenFile)
+			} else {
+				c.log.Info("Remote MCP disabled: no token configured")
+			}
+		}
+		c.mu.Unlock()
+		return nil, 0, errors.New("remote MCP disabled: no token")
+	}
 	c.nextID++
 	id := c.nextID
 	session := c.session
 	c.mu.Unlock()
+
+	req := map[string]any{"jsonrpc": "2.0", "method": method}
 	if withID {
 		req["id"] = id
 	}
@@ -292,17 +517,36 @@ func (c *MCPClient) post(ctx context.Context, method string, params json.RawMess
 	}
 	hr.Header.Set("Content-Type", "application/json")
 	hr.Header.Set("Accept", "application/json, text/event-stream")
-	if c.token != "" {
-		hr.Header.Set("Authorization", "Bearer "+c.token)
-	}
+	hr.Header.Set("Authorization", "Bearer "+token)
 	if session != "" {
 		hr.Header.Set("Mcp-Session-Id", session)
 	}
+
 	resp, err := c.http.Do(hr)
 	if err != nil {
 		return nil, 0, err
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		c.mu.Lock()
+		dur := c.authBackoff
+		if dur <= 0 {
+			dur = mcpAuthBackoff
+		}
+		c.backoffUntil = time.Now().Add(dur)
+		c.inited = false
+		c.session = ""
+		logged := c.authLogged
+		c.authLogged = true
+		c.mu.Unlock()
+
+		if !logged {
+			c.log.Warn("MCP auth failed, backing off", "status", resp.StatusCode, "backoff", dur)
+		}
+		return nil, resp.StatusCode, fmt.Errorf("%s: HTTP %d", method, resp.StatusCode)
+	}
+
 	if s := resp.Header.Get("Mcp-Session-Id"); s != "" {
 		c.mu.Lock()
 		c.session = s
@@ -396,4 +640,13 @@ func formatToolResult(res json.RawMessage) json.RawMessage {
 func toolError(msg string) json.RawMessage {
 	data, _ := json.Marshal(map[string]any{"status": "error", "message": msg})
 	return data
+}
+
+func readSecretFile(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	line, _, _ := strings.Cut(string(data), "\n")
+	return strings.TrimSpace(line)
 }

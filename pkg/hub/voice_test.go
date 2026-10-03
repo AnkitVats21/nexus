@@ -320,7 +320,11 @@ func TestVoiceMCPTools(t *testing.T) {
 	defer mcpSrv.Close()
 
 	g := newFakeGemini(t)
-	srv := newVoiceHub(t, g, NewMCPClient(mcpSrv.URL, "mcp-token", 0, nil))
+	mcp := NewMCPClient(mcpSrv.URL, "mcp-token", 0, nil)
+	if err := mcp.Refresh(ctx); err != nil {
+		t.Fatalf("mcp refresh: %v", err)
+	}
+	srv := newVoiceHub(t, g, mcp)
 	conn, _ := connectBoard(t, ctx, srv.URL, nil, testToken)
 	br := &boardReader{t: t, conn: conn}
 	write(t, ctx, conn, map[string]any{"type": "session_start", "setup": boardSetup(), "text": "remote"})
