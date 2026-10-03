@@ -41,6 +41,7 @@ func main() {
 	tokenFile := flag.String("token-file", filepath.Join(home, ".config", "nexus", "hub_tokens"),
 		"board tokens, one per line (the board's hub token must be one of them)")
 	webDir := flag.String("web", "", "dashboard build to serve (waveshare-dashboard: npm run build -- --mode device, then dist/)")
+	deviceWebDir := flag.String("device-web", "", "device dashboard build to serve at /hub/d/{id}/ (default: web/apps/device/dist if present)")
 	mdns := flag.Bool("mdns", true, "advertise _nexus-hub._tcp so boards find the hub")
 	mdnsIface := flag.String("mdns-iface", "", "interfaces to advertise on, comma-separated (default: the LAN ones)")
 	geminiKeyFile := flag.String("gemini-key-file", filepath.Join(home, ".config", "nexus", "gemini_key"),
@@ -166,7 +167,7 @@ func main() {
 			cache = nil
 		}
 	}
-	h, err := hub.New(hub.Config{Version: version, Tokens: tokens, WebDir: *webDir, Log: log,
+	h, err := hub.New(hub.Config{Version: version, Tokens: tokens, WebDir: *webDir, DeviceWebDir: *deviceWebDir, Log: log,
 		GeminiKey: geminiKey, Uplink: *uplink, MCP: mcp, Tracks: tracks, Cache: cache,
 		DBPath: *dbPath, TrustedProxy: *trustedProxy, PublicURL: *publicURL, AllowedOrigins: allowOrigins,
 		LegacyTokens: legacyTokens, PairingPepperPath: *pairingPepperFile})

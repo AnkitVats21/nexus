@@ -66,7 +66,9 @@ type Config struct {
 	Tokens []string
 	// The dashboard build to serve ("" = none).
 	WebDir string
-	Log    *slog.Logger
+	// The device dashboard build to serve at /hub/d/{id}/ ("" = none).
+	DeviceWebDir string
+	Log          *slog.Logger
 
 	// Voice: the Gemini API key ("" = no voice through the hub) and the Live
 	// endpoint (DefaultGeminiURL; tests use a fake).
@@ -878,24 +880,47 @@ func newProxy(target *url.URL) *httputil.ReverseProxy {
 	}
 }
 
+func (h *Hub) deviceWebDir() string {
+	if h.cfg.DeviceWebDir != "" {
+		return h.cfg.DeviceWebDir
+	}
+	if h.cfg.WebDir != "" {
+		sub := filepath.Join(h.cfg.WebDir, "device")
+		if st, err := os.Stat(sub); err == nil && st.IsDir() {
+			return sub
+		}
+		subD := filepath.Join(h.cfg.WebDir, "d")
+		if st, err := os.Stat(subD); err == nil && st.IsDir() {
+			return subD
+		}
+		sibling := filepath.Join(filepath.Dir(filepath.Dir(h.cfg.WebDir)), "device", "dist")
+		if st, err := os.Stat(sibling); err == nil && st.IsDir() {
+			return sibling
+		}
+		return h.cfg.WebDir
+	}
+	return ""
+}
+
 func (h *Hub) serveDeviceProxy(w http.ResponseWriter, r *http.Request) {
-	// Format: /hub/d/{id}/api/...
+	// Format: /hub/d/{id}/api/... or /hub/d/{id}/... (static device web app)
 	cleanPath := path.Clean(r.URL.Path)
-	if !strings.HasPrefix(cleanPath, "/hub/d/") {
+	if !strings.HasPrefix(cleanPath, "/hub/d/") && cleanPath != "/hub/d" {
 		http.NotFound(w, r)
 		return
 	}
 	rest := strings.TrimPrefix(cleanPath, "/hub/d/")
 	parts := strings.SplitN(rest, "/", 2)
 	deviceID := parts[0]
-	if deviceID == "" || len(parts) < 2 {
+	if deviceID == "" {
 		http.NotFound(w, r)
 		return
 	}
-	subPath := "/" + parts[1]
-	if subPath != "/api" && !strings.HasPrefix(subPath, "/api/") {
-		http.NotFound(w, r)
-		return
+	var subPath string
+	if len(parts) > 1 {
+		subPath = "/" + parts[1]
+	} else {
+		subPath = "/"
 	}
 
 	if h.auth != nil {
@@ -909,19 +934,21 @@ func (h *Hub) serveDeviceProxy(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		switch r.Method {
-		case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
-			origin := r.Header.Get("Origin")
-			if origin == "" {
-				origin = r.Header.Get("Referer")
-			}
-			if origin == "" {
-				writeError(w, http.StatusForbidden, "csrf: missing origin or referer")
-				return
-			}
-			if !auth.MatchOrigin(origin, r.Host, h.cfg.PublicURL, h.cfg.AllowedOrigins) {
-				writeError(w, http.StatusForbidden, "csrf: origin mismatch")
-				return
+		if subPath == "/api" || strings.HasPrefix(subPath, "/api/") {
+			switch r.Method {
+			case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
+				origin := r.Header.Get("Origin")
+				if origin == "" {
+					origin = r.Header.Get("Referer")
+				}
+				if origin == "" {
+					writeError(w, http.StatusForbidden, "csrf: missing origin or referer")
+					return
+				}
+				if !auth.MatchOrigin(origin, r.Host, h.cfg.PublicURL, h.cfg.AllowedOrigins) {
+					writeError(w, http.StatusForbidden, "csrf: origin mismatch")
+					return
+				}
 			}
 		}
 
@@ -930,32 +957,47 @@ func (h *Hub) serveDeviceProxy(w http.ResponseWriter, r *http.Request) {
 			h.mu.Lock()
 			e := h.edges[deviceID]
 			h.mu.Unlock()
-			if e != nil && e.isLegacyToken && e.ownerID == u.ID {
-				// legacy device owned by first admin
+			if e != nil && e.isLegacyToken && (e.ownerID == u.ID || u.Role == "admin") {
+				// legacy device
 			} else {
 				writeError(w, http.StatusNotFound, "device not found")
 				return
 			}
-		} else if dev.OwnerID != u.ID {
+		} else if dev.OwnerID != u.ID && u.Role != "admin" {
 			writeError(w, http.StatusForbidden, "forbidden: not device owner")
 			return
 		}
 	}
 
-	h.mu.Lock()
-	b := h.edges[deviceID]
-	h.mu.Unlock()
-	if b == nil || b.proxy == nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusServiceUnavailable)
-		w.Write([]byte(`{"status":"error","message":"board offline"}`))
+	if subPath == "/api" || strings.HasPrefix(subPath, "/api/") {
+		h.mu.Lock()
+		b := h.edges[deviceID]
+		h.mu.Unlock()
+		if b == nil || b.proxy == nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			w.Write([]byte(`{"status":"error","message":"board offline"}`))
+			return
+		}
+
+		r2 := r.Clone(r.Context())
+		r2.URL.Path = subPath
+		r2.URL.RawPath = ""
+		b.proxy.ServeHTTP(w, r2)
 		return
 	}
 
-	r2 := r.Clone(r.Context())
-	r2.URL.Path = subPath
-	r2.URL.RawPath = ""
-	b.proxy.ServeHTTP(w, r2)
+	// Serve the static device web app
+	deviceDir := h.deviceWebDir()
+	if deviceDir == "" {
+		http.NotFound(w, r)
+		return
+	}
+	p := filepath.Join(deviceDir, filepath.FromSlash(filepath.Clean(subPath)))
+	if st, err := os.Stat(p); err != nil || st.IsDir() {
+		p = filepath.Join(deviceDir, "index.html")
+	}
+	http.ServeFile(w, r, p)
 }
 
 func (h *Hub) serveAPI(w http.ResponseWriter, r *http.Request) {

@@ -1519,3 +1519,131 @@ func TestConcurrentPairingClaims(t *testing.T) {
 		t.Fatalf("expected exactly 1 claimed and 1 rejected 'bad code', got claimed=%d rejected=%d", claimedCount, rejectedCount)
 	}
 }
+
+func TestDeviceAppStaticServingAndAuth(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	devWebDir, err := os.MkdirTemp("", "nexus-device-web-*")
+	if err != nil {
+		t.Fatalf("MkdirTemp devWebDir: %v", err)
+	}
+	defer os.RemoveAll(devWebDir)
+
+	fakeIndex := []byte("<!DOCTYPE html><html><body>Device App Bundle</body></html>")
+	if err := os.WriteFile(filepath.Join(devWebDir, "index.html"), fakeIndex, 0644); err != nil {
+		t.Fatalf("WriteFile index.html: %v", err)
+	}
+
+	dir, err := os.MkdirTemp("", "nexus-hub-web-test-*")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	defer os.RemoveAll(dir)
+	dbPath := filepath.Join(dir, "hub.db")
+
+	h, err := New(Config{
+		Version:      "test",
+		Tokens:       []string{"test-token"},
+		DeviceWebDir: devWebDir,
+		DBPath:       dbPath,
+		TrustedProxy: "127.0.0.1",
+		PublicURL:    "http://hub.local:8380",
+	})
+	if err != nil {
+		t.Fatalf("New hub: %v", err)
+	}
+	srv := httptest.NewServer(h.Handler())
+	defer srv.Close()
+	defer h.Store().Close()
+
+	// 1. Setup admin Alice
+	setupCode := h.Auth().SetupCode()
+	res, _ := doJSON(t, srv, http.MethodPost, "/hub/api/setup", map[string]string{
+		"setup_code":   setupCode,
+		"username":     "alice",
+		"display_name": "Alice",
+		"password":     "AliceSecret123!",
+	}, nil)
+	aliceCookie := findCookie(res.Cookies(), auth.SessionCookieName)
+
+	// Create Bob (member)
+	res, body := doJSON(t, srv, http.MethodPost, "/hub/api/users", map[string]string{
+		"username":     "bob",
+		"display_name": "Bob",
+		"role":         "member",
+	}, aliceCookie)
+	var created map[string]any
+	_ = json.Unmarshal(body, &created)
+	tempPass := created["temp_password"].(string)
+
+	// Login Bob & update password
+	res, _ = doJSON(t, srv, http.MethodPost, "/hub/api/login", map[string]string{
+		"username": "bob",
+		"password": tempPass,
+	}, nil)
+	bobCookie := findCookie(res.Cookies(), auth.SessionCookieName)
+	_, _ = doJSON(t, srv, http.MethodPost, "/hub/api/me/password", map[string]string{
+		"current": tempPass,
+		"new":     "BobSecret123!",
+	}, bobCookie)
+
+	// Alice pairs device nexus-alice-1
+	res, body = doJSON(t, srv, http.MethodPost, "/hub/api/pairing", nil, aliceCookie)
+	var pData map[string]any
+	_ = json.Unmarshal(body, &pData)
+	alicePairCode := pData["code"].(string)
+
+	wsBase := "ws" + strings.TrimPrefix(srv.URL, "http") + EdgePath
+	connAlice, _, err := websocket.Dial(ctx, wsBase, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer connAlice.Close(websocket.StatusNormalClosure, "")
+	write(t, ctx, connAlice, map[string]any{
+		"type":      "hello",
+		"proto":     3,
+		"id":        "nexus-alice-1",
+		"name":      "Alice Device",
+		"kind":      "esp32-s3",
+		"pair_code": alicePairCode,
+	})
+	_ = read(t, ctx, connAlice) // claimed
+	_ = read(t, ctx, connAlice) // welcome
+
+	// 2. Unauthenticated request to /hub/d/nexus-alice-1/ -> 401
+	res, _ = doJSON(t, srv, http.MethodGet, "/hub/d/nexus-alice-1/", nil, nil)
+	if res.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected 401 unauthenticated for /hub/d/nexus-alice-1/, got %d", res.StatusCode)
+	}
+
+	// 3. Bob (non-owner) requests /hub/d/nexus-alice-1/ -> 403
+	res, _ = doJSON(t, srv, http.MethodGet, "/hub/d/nexus-alice-1/", nil, bobCookie)
+	if res.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 non-owner for /hub/d/nexus-alice-1/, got %d", res.StatusCode)
+	}
+
+	// 4. Alice (owner) requests /hub/d/nexus-alice-1/ -> 200 OK with device app content
+	res, body = doJSON(t, srv, http.MethodGet, "/hub/d/nexus-alice-1/", nil, aliceCookie)
+	if res.StatusCode != http.StatusOK || !strings.Contains(string(body), "Device App Bundle") {
+		t.Fatalf("expected 200 with Device App Bundle for owner, got status=%d body=%s", res.StatusCode, string(body))
+	}
+
+	// 5. Alice (owner) requests /hub/d/nexus-alice-1/index.html -> 200 OK
+	res, body = doJSON(t, srv, http.MethodGet, "/hub/d/nexus-alice-1/index.html", nil, aliceCookie)
+	if res.StatusCode != http.StatusOK || !strings.Contains(string(body), "Device App Bundle") {
+		t.Fatalf("expected 200 with Device App Bundle for index.html, got status=%d", res.StatusCode)
+	}
+
+	// 6. SPA fallback: Alice requests /hub/d/nexus-alice-1/settings -> 200 OK with index.html
+	res, body = doJSON(t, srv, http.MethodGet, "/hub/d/nexus-alice-1/settings", nil, aliceCookie)
+	if res.StatusCode != http.StatusOK || !strings.Contains(string(body), "Device App Bundle") {
+		t.Fatalf("expected 200 SPA fallback for unknown path, got status=%d", res.StatusCode)
+	}
+
+	// 7. Path traversal attempt /hub/d/nexus-alice-1/../x -> 404
+	res, _ = doJSON(t, srv, http.MethodGet, "/hub/d/nexus-alice-1/../x", nil, aliceCookie)
+	if res.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404 for traversed path, got %d", res.StatusCode)
+	}
+}
