@@ -32,7 +32,7 @@ type Tools interface {
 type noTools struct{}
 
 func (noTools) Declarations(context.Context, map[string]bool, bool) []map[string]any { return nil }
-func (noTools) Has(string) bool                                                       { return false }
+func (noTools) Has(string) bool                                                      { return false }
 func (noTools) Call(_ context.Context, name string, _ json.RawMessage) json.RawMessage {
 	return toolError("no such tool: " + name)
 }
@@ -46,29 +46,36 @@ func (noTools) CallStructured(_ context.Context, name string, _ json.RawMessage,
 // LocalTools runs the tools of a nexus-mcp registry in-process. The same code
 // serves the board through the standalone server when the hub is away.
 type LocalTools struct {
-	reg *tools.Registry
-	log *slog.Logger
+	reg  *tools.Registry
+	log  *slog.Logger
+	skip map[string]bool // not run here (no config): the remote server's
 }
 
-// NewLocalTools wraps reg.
-func NewLocalTools(reg *tools.Registry, log *slog.Logger) *LocalTools {
+// NewLocalTools wraps reg, leaving out the tools named in skip.
+func NewLocalTools(reg *tools.Registry, log *slog.Logger, skip ...string) *LocalTools {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &LocalTools{reg: reg, log: log.With("component", "localtools")}
+	l := &LocalTools{reg: reg, log: log.With("component", "localtools"), skip: map[string]bool{}}
+	for _, n := range skip {
+		l.skip[n] = true
+	}
+	return l
 }
 
-// Names lists the tools, in registry order.
+// Names lists the tools run here, in registry order.
 func (l *LocalTools) Names() []string {
 	var out []string
 	for _, t := range l.reg.Tools() {
-		out = append(out, t.Name)
+		if !l.skip[t.Name] {
+			out = append(out, t.Name)
+		}
 	}
 	return out
 }
 
 func (l *LocalTools) Has(name string) bool {
-	if l == nil {
+	if l == nil || l.skip[name] {
 		return false
 	}
 	_, ok := l.reg.Get(name)
@@ -81,6 +88,9 @@ func (l *LocalTools) Declarations(_ context.Context, skip map[string]bool, built
 	}
 	var list []mcpTool
 	for _, t := range l.reg.Tools() {
+		if l.skip[t.Name] {
+			continue
+		}
 		mt := mcpTool{Name: t.Name, Description: t.Description, InputSchema: t.InputSchema}
 		if t.DeviceOnly {
 			mt.Meta = map[string]any{"nexus/device_only": true}
@@ -93,7 +103,7 @@ func (l *LocalTools) Declarations(_ context.Context, skip map[string]bool, built
 // run calls the tool; a panic in it is an error, not a dead hub.
 func (l *LocalTools) run(ctx context.Context, name string, args json.RawMessage) (res tools.Result, err error) {
 	t, ok := l.reg.Get(name)
-	if !ok {
+	if !ok || l.skip[name] {
 		return tools.Result{}, errors.New("no such tool: " + name)
 	}
 	defer func() {

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/AnkitVats21/nexus-mcp/tools"
 	"log/slog"
 	"net"
 	"net/http"
@@ -37,6 +38,10 @@ func main() {
 	mcpURL := flag.String("mcp-url", os.Getenv("NEXUS_MCP_URL"), "MCP server for voice tools (default $NEXUS_MCP_URL; empty = none)")
 	mcpTokenFile := flag.String("mcp-token-file", filepath.Join(home, ".config", "nexus", "mcp_token"), "MCP bearer token")
 	mcpMaxTools := flag.Int("mcp-max-tools", hub.DefaultMCPMaxTools, "most MCP tools offered to Gemini")
+	localTools := flag.Bool("local-tools", true,
+		"run nexus-mcp's tools (news, weather, web search, music lookups) in this process; the MCP server serves only the tools not run here")
+	musicAPI := flag.String("music-api", os.Getenv("NEXUS_MCP_MUSIC_API"),
+		"Invidious-compatible API for the local music tools (default $NEXUS_MCP_MUSIC_API, else --invidious-url; none: music lookups go to MCP)")
 	music := flag.Bool("music", true, "run the music (queue, lookups, outputs) for the edges")
 	invidiousURL := flag.String("invidious-url", os.Getenv("NEXUS_INVIDIOUS_URL"),
 		"Invidious-compatible API (invidious-daemon) for music lookups, after MCP (default $NEXUS_INVIDIOUS_URL)")
@@ -69,26 +74,60 @@ func main() {
 	if geminiKey == "" {
 		log.Warn("No Gemini key: voice sessions stay on the board", "file", *geminiKeyFile)
 	}
-	var mcp *hub.MCPClient
+	var remote *hub.MCPClient
 	if *mcpURL != "" {
-		mcp = hub.NewMCPClient(*mcpURL, readSecret(*mcpTokenFile), *mcpMaxTools, log)
+		remote = hub.NewMCPClient(*mcpURL, readSecret(*mcpTokenFile), *mcpMaxTools, log)
+	}
+	var local *hub.LocalTools
+	if *localTools {
+		// The Gemini key is read from its file at call time, like the
+		// voice sessions' key. A tool whose config is missing is not run
+		// here, so the remote server (if any) still serves it.
+		musicURL := *musicAPI
+		if musicURL == "" {
+			musicURL = *invidiousURL
+		}
+		reg := tools.NewDefaultRegistry(tools.Config{GeminiKeyFile: *geminiKeyFile, MusicURL: musicURL})
+		local = hub.NewLocalTools(reg, log, localSkip(geminiKey != "", musicURL != "")...)
+		log.Info("Local tools", "names", hub.JoinNames(local.Names()))
+	}
+	var mcp hub.Tools
+	switch {
+	case local != nil && remote != nil:
+		mcp = hub.ToolSet{Local: local, Remote: remote, MaxTools: *mcpMaxTools}
+	case local != nil:
+		mcp = hub.ToolSet{Local: local, MaxTools: *mcpMaxTools}
+	case remote != nil:
+		mcp = remote
+	}
+	if remote != nil {
 		// List the tools now, so the first session's setup doesn't wait for it.
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
-			mcp.Declarations(ctx, nil, false)
+			log.Info("Remote tools", "names", hub.JoinNames(hub.RemoteOnlyNames(ctx, local, remote)))
 		}()
 	}
 
 	var tracks hub.TrackSource
 	if *music {
-		switch {
-		case mcp != nil && *invidiousURL != "":
-			tracks = hub.FallbackTracks{Primary: hub.MCPTracks{C: mcp}, Secondary: hub.NewInvidiousTracks(*invidiousURL)}
-		case mcp != nil:
-			tracks = hub.MCPTracks{C: mcp}
-		case *invidiousURL != "":
-			tracks = hub.NewInvidiousTracks(*invidiousURL)
+		// Local lookups first, then the MCP server, then Invidious directly.
+		var chain []hub.TrackSource
+		if local != nil && local.Has("music_track") && local.Has("music_search") {
+			chain = append(chain, hub.LocalTracks(local))
+		}
+		if remote != nil {
+			chain = append(chain, hub.MCPTracks{C: remote})
+		}
+		if *invidiousURL != "" {
+			chain = append(chain, hub.NewInvidiousTracks(*invidiousURL))
+		}
+		for i := len(chain) - 1; i >= 0; i-- {
+			if tracks == nil {
+				tracks = chain[i]
+			} else {
+				tracks = hub.FallbackTracks{Primary: chain[i], Secondary: tracks}
+			}
 		}
 	}
 	var cache *hub.MusicCache
@@ -141,11 +180,23 @@ func main() {
 	}()
 
 	log.Info("nexus-hub listening", "version", version, "port", port, "web", *webDir, "tokens", len(tokens),
-		"voice", geminiKey != "", "mcp", mcp != nil, "music", trackSourceName(tracks))
+		"voice", geminiKey != "", "tools", mcp != nil, "music", trackSourceName(tracks))
 	if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Error("Server failed", "err", err)
 		os.Exit(1)
 	}
+}
+
+// localSkip names the local tools that can't run for lack of config.
+func localSkip(haveGeminiKey, haveMusicAPI bool) []string {
+	var skip []string
+	if !haveGeminiKey {
+		skip = append(skip, "web_search")
+	}
+	if !haveMusicAPI {
+		skip = append(skip, "music_search", "music_track")
+	}
+	return skip
 }
 
 // readSecret returns the first line of a file, "" if it can't be read.

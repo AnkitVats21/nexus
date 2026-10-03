@@ -25,7 +25,7 @@ import (
 const (
 	DefaultGeminiURL = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
 
-	uplinkFlagOpus    = 0x02
+	uplinkFlagOpus = 0x02
 
 	defaultVoiceLead  = 1500 * time.Millisecond
 	geminiDialTimeout = 10 * time.Second

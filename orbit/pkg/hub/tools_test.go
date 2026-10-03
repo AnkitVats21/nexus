@@ -245,3 +245,27 @@ func TestLocalTracks(t *testing.T) {
 		t.Fatalf("fallback: %v %+v", err, info)
 	}
 }
+
+// A tool skipped for lack of config is not local: the remote server's serves it.
+func TestLocalToolsSkip(t *testing.T) {
+	ctx := context.Background()
+	reg, _ := stubRegistry(t, "")
+	l := NewLocalTools(reg, nil, "web_search", "music_search", "music_track")
+	if got := strings.Join(l.Names(), ","); got != "news_headlines,weather" {
+		t.Fatalf("names %s", got)
+	}
+	if l.Has("web_search") || l.Has("music_track") || !l.Has("weather") {
+		t.Fatal("Has")
+	}
+	if got := names(l.Declarations(ctx, nil, false)); got != "news_headlines,weather" {
+		t.Fatalf("declarations %s", got)
+	}
+	remote := &fakeTools{name: "remote", have: map[string]bool{"web_search": true, "music_track": true}}
+	s := ToolSet{Local: l, Remote: remote}
+	if got := string(s.Call(ctx, "web_search", nil)); got != `{"result":"remote"}` {
+		t.Fatalf("got %s", got)
+	}
+	if err := s.CallStructured(ctx, "music_track", nil, nil); err == nil || err.Error() != "remote" {
+		t.Fatalf("got %v", err)
+	}
+}
