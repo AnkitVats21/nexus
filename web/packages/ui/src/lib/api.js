@@ -38,11 +38,43 @@ export function setHost(host) {
   return clean;
 }
 
-const base = () => `http://${getHost()}`;
-export const wsUrl = () => `ws://${getHost()}/api/ws`;
+export function getProxyPrefix() {
+  if (typeof window !== 'undefined' && window.location?.pathname) {
+    const m = window.location.pathname.match(/^(\/hub\/d\/[^/]+)/);
+    if (m) return m[1];
+  }
+  return '';
+}
+
+export function getApiBase() {
+  const proxy = getProxyPrefix();
+  return proxy ? `${proxy}/api` : '/api';
+}
+
+export function base() {
+  const proxy = getProxyPrefix();
+  if (proxy) return proxy;
+  if (import.meta.env.MODE === 'device') {
+    return '';
+  }
+  return `http://${getHost()}`;
+}
+
+export const wsUrl = () => {
+  const proxy = getProxyPrefix();
+  if (proxy) {
+    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    return `${proto}//${window.location.host}${proxy}/api/ws`;
+  }
+  if (import.meta.env.MODE === 'device' && typeof window !== 'undefined') {
+    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    return `${proto}//${window.location.host}/api/ws`;
+  }
+  return `ws://${getHost()}/api/ws`;
+};
 
 async function request(path, { method = 'GET', json, body, headers, raw = false } = {}) {
-  const opts = { method, headers: { ...headers } };
+  const opts = { method, headers: { ...headers }, credentials: 'same-origin' };
   if (json !== undefined) {
     opts.body = JSON.stringify(json);
     opts.headers['Content-Type'] = 'application/json';
@@ -55,6 +87,7 @@ async function request(path, { method = 'GET', json, body, headers, raw = false 
     try {
       const data = await res.json();
       if (data?.message) message = data.message;
+      else if (data?.error) message = data.error;
     } catch {
       // Not JSON; keep the status text.
     }
@@ -113,7 +146,7 @@ function filterTracks(tracks, filter) {
 
 export async function getLibrary(filter = '') {
   if (!filter || !libraryCache) {
-    const res = await fetch(`${base()}/api/db/music`, { cache: 'no-store' });
+    const res = await fetch(`${base()}/api/db/music`, { cache: 'no-store', credentials: 'same-origin' });
     if (!res.ok) throw new Error(res.status === 404 ? 'Library not ready yet' : `${res.status} ${res.statusText}`);
     const db = readNdb(await res.arrayBuffer(), NDB_SCHEMAS.music);
     libraryCache = [...db.collections.tracks]
@@ -176,7 +209,7 @@ export const RECORDING_MODES = { 0: 'unknown', 1: 'stereo', 2: 'processed' };
 // The list is recordings.ndb itself, decoded here (lib/ndb.js), newest first.
 // Each entry: {id, file, started, duration_ms, mode, sample_rate, channels, size}.
 export async function getRecordings() {
-  const res = await fetch(`${base()}/api/db/recordings`, { cache: 'no-store' });
+  const res = await fetch(`${base()}/api/db/recordings`, { cache: 'no-store', credentials: 'same-origin' });
   if (!res.ok) throw new Error(res.status === 404 ? 'Recordings list not ready yet' : `${res.status} ${res.statusText}`);
   const db = readNdb(await res.arrayBuffer(), NDB_SCHEMAS.recordings);
   return [...db.collections.recordings]
