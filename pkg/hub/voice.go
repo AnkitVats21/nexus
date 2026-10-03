@@ -104,6 +104,7 @@ type voiceSession struct {
 	outputting bool // reply audio or a tool call since the last turn end
 	dropReply  bool // the board interrupted: drop audio until the turn ends
 	handoff    bool // goAway: move to a new connection at the next turn end
+	endSent    bool // end_after_reply sent in this turn
 
 	// Per reply, logged at its end.
 	replyFirst, replyLast time.Time
@@ -305,6 +306,7 @@ func (v *voiceSession) startSession(m sessionStartMsg) {
 		v.parkTimer = nil
 	}
 	v.active = true
+	v.endSent = false
 	v.announced = false
 	v.tries = 0
 	v.start = m
@@ -609,6 +611,7 @@ func (v *voiceSession) onGemini(gc *geminiConn, data []byte) {
 		}
 		if sc.TurnComplete {
 			v.logReplyLocked("complete")
+			v.endSent = false
 			v.dropReply = false
 			v.outputting = false
 			v.owed = false
@@ -819,6 +822,19 @@ func (v *voiceSession) callMusic(gc *geminiConn, id, name string, args json.RawM
 	t0 := time.Now()
 	res := v.h.music.toolCall(from, name, args)
 	v.log.Info("Music tool", "name", name, "ms", time.Since(t0).Milliseconds(), "result", string(res))
+	var st struct {
+		Status string `json:"status"`
+	}
+	if json.Unmarshal(res, &st) == nil && st.Status == "success" {
+		// As in direct mode, a music command ends the session once the reply
+		// has played (the music may be on another speaker the mic can hear).
+		v.mu.Lock()
+		if v.active && !v.endSent {
+			v.endSent = true
+			v.sendBoardLocked(map[string]any{"type": "end_after_reply"})
+		}
+		v.mu.Unlock()
+	}
 	v.sendToolResponse(gc, id, res)
 }
 

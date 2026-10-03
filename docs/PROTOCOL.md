@@ -136,6 +136,7 @@ Hub to edge:
 | `tool_call` | `id`, `name`, `args`: a tool the edge declared |
 | `reply_owed` | a hub tool is running; a reply is still coming |
 | `turn_complete`, `interrupted` | in order after the audio before them |
+| `end_after_reply` | after a hub music tool succeeded (once per turn): the edge ends the session once the current reply has played, as after a music command; optional, an edge may ignore it |
 | `session_error` | `reason`; the edge ends the session |
 
 **Setup.** `setup` is the Gemini Live setup the edge wants (model, voice,

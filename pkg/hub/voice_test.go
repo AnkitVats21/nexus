@@ -375,3 +375,39 @@ func TestVoiceSearchSetup(t *testing.T) {
 		t.Fatal("search after the model refused it")
 	}
 }
+
+// end_after_reply follows hub music tools only: a board tool does not get it.
+func TestNoEndAfterReplyForBoardTool(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	g := newFakeGemini(t)
+	srv := newVoiceHub(t, g, nil)
+	conn, _ := connectBoard(t, ctx, srv.URL, nil, testToken)
+	write(t, ctx, conn, map[string]any{"type": "session_start", "setup": boardSetup(), "keepalive_s": 60, "resume_min": 60})
+	for {
+		_, data, err := conn.Read(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(data), "session_ready") {
+			break
+		}
+	}
+	write(t, ctx, conn, map[string]any{"type": "text_turn", "text": "tool"})
+	write(t, ctx, conn, map[string]any{"type": "tool_response", "id": "t1", "result": map[string]any{"status": "ok"}})
+	for {
+		typ, data, err := conn.Read(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if typ == websocket.MessageBinary {
+			continue
+		}
+		if strings.Contains(string(data), "end_after_reply") {
+			t.Fatalf("end_after_reply after a board tool: %s", data)
+		}
+		if strings.Contains(string(data), "turn_complete") {
+			return
+		}
+	}
+}

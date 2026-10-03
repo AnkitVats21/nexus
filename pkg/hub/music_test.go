@@ -237,6 +237,7 @@ func TestMusicVoiceTool(t *testing.T) {
 	if m := board.next(ctx, "music_play", "tool_call"); m["type"] != "music_play" || m["track"].(map[string]any)["id"] != "a" {
 		t.Fatalf("got %v, want music_play", m)
 	}
+	board.next(ctx, "end_after_reply")
 	board.next(ctx, "turn_complete")
 
 	_, setups, inputs := g.snapshot()
