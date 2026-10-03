@@ -3,14 +3,14 @@ import clsx from 'clsx';
 import {
   Cpu, Wifi, HardDrive, Package, Globe, Power, Terminal, Upload, RotateCcw, Pause, Play, Trash2, Link2, MemoryStick,
 } from 'lucide-react';
-import { Banner, Button, Card, Meter, PageHeader, Pill, Row, Stat } from '../components/ui';
-import { useToast } from '../components/Toast';
+import {
+  Banner, Button, Card, Meter, PageHeader, Pill, Row, Stat,
+  useToast,
+  getFirmwareStatus, getFlashInfo, getFrontendStatus, getLogs, getMetrics, getStorageInfo, isDeviceBuild, reboot, rollbackFrontend, uploadFirmware,
+  formatBytes, formatUptime, signalLabel,
+} from '@nexus/ui';
 import { useNexus } from '../DeviceContext';
 import { usePoll } from '../hooks/usePoll';
-import {
-  getFirmwareStatus, getFlashInfo, getFrontendStatus, getLogs, getMetrics, getStorageInfo, isDeviceBuild, reboot, rollbackFrontend, uploadFirmware,
-} from '../lib/api';
-import { formatBytes, formatUptime, signalLabel } from '../lib/format';
 
 function Health() {
   const { data: m } = usePoll(getMetrics, 5000);

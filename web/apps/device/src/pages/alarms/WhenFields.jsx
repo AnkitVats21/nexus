@@ -1,6 +1,6 @@
 import React from 'react';
 import clsx from 'clsx';
-import { Field } from '../../components/ui';
+import { Field } from '@nexus/ui';
 import { DAY_NAMES, EVERY_DAY, WEEKDAYS, WEEKENDS, daysLabel, dateOf, epochOf, parseTime, timeOf } from '../../lib/schedule';
 
 const PRESETS = [

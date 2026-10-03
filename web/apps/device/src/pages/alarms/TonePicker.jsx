@@ -1,15 +1,15 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Download, Trash2, Upload } from 'lucide-react';
-import { Button, IconButton, Segmented } from '../../components/ui';
-import { useToast } from '../../components/Toast';
-import { formatBytes } from '../../lib/format';
 import {
+  Button, IconButton, Segmented,
+  useToast,
+  formatBytes,
   deleteToneFile,
   getAlarmTones,
   getYouTubeToneStatus,
   startYouTubeTone,
   uploadToneFile,
-} from '../../lib/api';
+} from '@nexus/ui';
 import { sniffAudioFile, opusErrorMessage } from '../../lib/audioSniff';
 
 const TONE_SOURCES = [

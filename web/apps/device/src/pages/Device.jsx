@@ -1,8 +1,7 @@
 import React from 'react';
 import clsx from 'clsx';
 import { Volume2, Mic, Lightbulb } from 'lucide-react';
-import { Card, PageHeader, Switch } from '../components/ui';
-import CommitSlider from '../components/CommitSlider';
+import { Card, PageHeader, Switch, CommitSlider } from '@nexus/ui';
 import { useNexus, LED_MODES } from '../DeviceContext';
 import AlertSounds from '../components/AlertSounds';
 

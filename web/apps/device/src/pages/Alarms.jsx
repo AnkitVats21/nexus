@@ -1,10 +1,9 @@
 import React, { useEffect, useState } from 'react';
 import { AlarmClock, StickyNote, Timer, Zap } from 'lucide-react';
-import { PageHeader, Segmented } from '../components/ui';
+import { PageHeader, Segmented, getAlarms, getReminders } from '@nexus/ui';
 import { useNexus } from '../DeviceContext';
 import { usePoll } from '../hooks/usePoll';
 import { useDeviceClock } from '../hooks/useDeviceClock';
-import { getAlarms, getReminders } from '../lib/api';
 import AlarmsView from './alarms/AlarmsView';
 import TimersView from './alarms/TimersView';
 import RemindersView from './alarms/RemindersView';

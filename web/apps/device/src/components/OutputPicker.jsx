@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import clsx from 'clsx';
 import { Speaker, Laptop, Check } from 'lucide-react';
-import { IconButton } from './ui';
+import { IconButton } from '@nexus/ui';
 import { useNexus } from '../DeviceContext';
 
 // Where the music plays: the board's speaker, or a satellite (nexus-orbit on a

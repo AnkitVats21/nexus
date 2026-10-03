@@ -1,9 +1,6 @@
 import React, { useState } from 'react';
 import { AlarmClockOff, BellRing } from 'lucide-react';
-import { Banner, Button } from './ui';
-import { snoozeAlarm, stopAlarm } from '../lib/api';
-import { pad2 } from '../lib/format';
-import { useToast } from './Toast';
+import { Banner, Button, snoozeAlarm, stopAlarm, pad2, useToast } from '@nexus/ui';
 
 // Shown on every page while an alarm rings or is snoozed.
 // alarm: the WebSocket snapshot's {state, id, snooze_until?, builtin_tone}.

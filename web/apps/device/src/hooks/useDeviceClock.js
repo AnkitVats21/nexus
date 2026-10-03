@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { usePoll } from './usePoll';
-import { getTime } from '../lib/api';
+import { getTime } from '@nexus/ui';
 
 // The device clock (/api/time), polled every minute, plus a ticking `now`
 // (epoch seconds) that follows the device clock rather than this computer's.

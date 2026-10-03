@@ -1,11 +1,11 @@
 import React, { useEffect, useRef, useState } from 'react';
 import clsx from 'clsx';
 import { Check, Music, Pencil, Play, Square, Trash2, Upload, X } from 'lucide-react';
-import { Button, Card, Field, IconButton, Pill } from '../../components/ui';
-import CommitSlider from '../../components/CommitSlider';
-import { useToast } from '../../components/Toast';
-import { formatBytes } from '../../lib/format';
 import {
+  Button, Card, Field, IconButton, Pill,
+  CommitSlider,
+  useToast,
+  formatBytes,
   deleteToneFile,
   getAlarms,
   getAlarmStatus,
@@ -16,7 +16,7 @@ import {
   saveAlarm,
   stopMusic,
   uploadToneFile,
-} from '../../lib/api';
+} from '@nexus/ui';
 import { sniffAudioFile, opusErrorMessage } from '../../lib/audioSniff';
 import { useNexus } from '../../DeviceContext';
 

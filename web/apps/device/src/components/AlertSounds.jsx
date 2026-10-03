@@ -1,11 +1,8 @@
 import React, { useRef, useState } from 'react';
 import clsx from 'clsx';
 import { BellRing, Play, RotateCcw } from 'lucide-react';
-import { Button, Card, IconButton, Pill, Switch } from './ui';
-import CommitSlider from './CommitSlider';
-import { useToast } from './Toast';
+import { Button, Card, IconButton, Pill, Switch, CommitSlider, useToast, getAlerts, previewAlert, resetAlert, updateAlert, uploadAlert } from '@nexus/ui';
 import { usePoll } from '../hooks/usePoll';
-import { getAlerts, previewAlert, resetAlert, updateAlert, uploadAlert } from '../lib/api';
 
 const LABELS = {
   wake_confirm: ['Wake', 'The wake word was heard.'],

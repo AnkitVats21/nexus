@@ -1,8 +1,6 @@
 import React, { useState } from 'react';
 import { Timer, Play, X } from 'lucide-react';
-import { Button, Card, Empty, Field, IconButton } from '../../components/ui';
-import { useToast } from '../../components/Toast';
-import { deleteAlarm, saveAlarm } from '../../lib/api';
+import { Button, Card, Empty, Field, IconButton, useToast, deleteAlarm, saveAlarm } from '@nexus/ui';
 import { formatCountdown, formatWhen } from '../../lib/schedule';
 
 const QUICK_MIN = [1, 5, 10, 15, 30, 60];

@@ -1,16 +1,16 @@
 import React, { useEffect, useState } from 'react';
 import clsx from 'clsx';
 import { Sparkles, Brain, StickyNote, KeyRound, AlertTriangle, Save, Trash2, ChevronDown, FileText, Info, MessagesSquare, Settings2, Wrench, Timer, AudioLines, Bug, X } from 'lucide-react';
-import { Banner, Button, Card, Empty, Field, IconButton, PageHeader, Pill, Segmented, Switch } from '../components/ui';
+import {
+  Banner, Button, Card, Empty, Field, IconButton, PageHeader, Pill, Segmented, Switch,
+  useToast,
+  MEMORY_FILE, NOTES_DIR, deleteFile, getAssistantConfig, getAssistantModels, listFiles, readTextFile, saveAssistantConfig, writeTextFile,
+  formatBytes,
+} from '@nexus/ui';
 import Conversation from './assistant/Conversation';
 import McpCard from './assistant/McpCard';
-import { useToast } from '../components/Toast';
 import { useNexus } from '../DeviceContext';
 import { ASSISTANT_STATES } from './Home';
-import {
-  MEMORY_FILE, NOTES_DIR, deleteFile, getAssistantConfig, getAssistantModels, listFiles, readTextFile, saveAssistantConfig, writeTextFile,
-} from '../lib/api';
-import { formatBytes } from '../lib/format';
 
 // Gemini Live prebuilt voices and their style.
 const VOICES = [

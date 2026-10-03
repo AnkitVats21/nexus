@@ -3,13 +3,10 @@ import clsx from 'clsx';
 import {
   Search, HardDrive, ListMusic, Play, ListPlus, ListStart, Loader2, RefreshCw, Trash2, X, Shuffle, Music2, HardDriveDownload, Sparkles,
 } from 'lucide-react';
-import { Button, Card, Empty, IconButton, PageHeader, Segmented, Switch } from '../components/ui';
+import { Button, Card, Empty, IconButton, PageHeader, Segmented, Switch, useToast, clearUnsavedHistory, deleteFromLibrary, getLibrary, getMix, playLocal, scanLibrary, searchYouTube, formatBytes, formatSeconds } from '@nexus/ui';
 import { TrackArt, useTrackInfo } from '../components/Track';
-import { useToast } from '../components/Toast';
 import { useNexus } from '../DeviceContext';
-import { clearUnsavedHistory, deleteFromLibrary, getLibrary, getMix, playLocal, scanLibrary, searchYouTube } from '../lib/api';
 import { needsResolution, resolveTrackInfo } from '../lib/trackMetadata';
-import { formatBytes, formatSeconds } from '../lib/format';
 
 const QUICK_PICKS = [
   { label: 'Lofi chill', query: 'lofi hip hop beats to relax' },

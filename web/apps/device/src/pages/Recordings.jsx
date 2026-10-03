@@ -1,15 +1,15 @@
 import React, { useEffect, useRef, useState } from 'react';
 import clsx from 'clsx';
 import { Check, Download, Mic, Pause, Pencil, Play, Speaker, Square, Trash2, X } from 'lucide-react';
-import { Button, Card, Empty, IconButton, PageHeader, Pill, Segmented } from '../components/ui';
-import { useToast } from '../components/Toast';
-import { useNexus } from '../DeviceContext';
-import { usePoll } from '../hooks/usePoll';
 import {
+  Button, Card, Empty, IconButton, PageHeader, Pill, Segmented,
+  useToast,
   RECORDING_MODES, deleteRecording, downloadRecording, getRecordings, getStorageInfo, playRecordingOnDevice,
   recordingTrackId, recordingUrl, renameRecording, startRecording, stopRecording,
-} from '../lib/api';
-import { formatBytes, formatClock } from '../lib/format';
+  formatBytes, formatClock,
+} from '@nexus/ui';
+import { useNexus } from '../DeviceContext';
+import { usePoll } from '../hooks/usePoll';
 
 const MAX_RECORDING_MS = 10 * 60 * 1000;  // AudioRecorder::MAX_DURATION_MS
 const MAX_NAME = 60;                       // Services::MAX_RECORDING_NAME

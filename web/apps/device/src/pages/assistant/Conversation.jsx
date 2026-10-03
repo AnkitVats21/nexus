@@ -1,11 +1,8 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import clsx from 'clsx';
 import { MessagesSquare, Mic, Square, TriangleAlert } from 'lucide-react';
-import { Banner, Button, Card, Empty } from '../../components/ui';
-import { useToast } from '../../components/Toast';
+import { Banner, Button, Card, Empty, useToast, startConversation, stopConversation, pad2 } from '@nexus/ui';
 import { useNexus } from '../../DeviceContext';
-import { startConversation, stopConversation } from '../../lib/api';
-import { pad2 } from '../../lib/format';
 
 // t_ms is device uptime; the snapshot's `up` (seconds) turns it into a time of day.
 function clockOf(tMs, upS) {

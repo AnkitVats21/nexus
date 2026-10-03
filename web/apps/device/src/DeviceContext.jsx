@@ -1,7 +1,6 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
-import { useDevice } from './hooks/useDevice';
+import { useDevice, getHost, setHost as persistHost, playStream, resolveStreamUrl } from '@nexus/ui';
 import { usePendingValue } from './hooks/usePendingValue';
-import { getHost, setHost as persistHost, playStream, resolveStreamUrl } from './lib/api';
 
 const DeviceContext = createContext(null);
 

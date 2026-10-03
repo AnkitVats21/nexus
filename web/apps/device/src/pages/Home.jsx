@@ -3,14 +3,11 @@ import clsx from 'clsx';
 import {
   Play, Pause, SkipForward, ListMusic, AlarmClock, Sparkles, Activity, Mic, MicOff, Lightbulb, LightbulbOff, Volume2, ChevronRight,
 } from 'lucide-react';
-import { Card, Empty, Meter, Pill, Stat, IconButton } from '../components/ui';
-import CommitSlider from '../components/CommitSlider';
+import { Card, Empty, Meter, Pill, Stat, IconButton, CommitSlider, getAlarms, getReminders, formatBytes, formatUptime, signalLabel } from '@nexus/ui';
 import { TrackArt, useTrackInfo } from '../components/Track';
 import { useNexus, LED_MODES } from '../DeviceContext';
 import { usePoll } from '../hooks/usePoll';
-import { getAlarms, getReminders } from '../lib/api';
 import { formatUntil, formatWhen, timeOf } from '../lib/schedule';
-import { formatBytes, formatUptime, signalLabel } from '../lib/format';
 
 export const ASSISTANT_STATES = {
   idle: { label: 'Waiting for wake word', tone: 'neutral' },

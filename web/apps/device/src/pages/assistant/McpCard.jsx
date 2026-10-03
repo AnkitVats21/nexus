@@ -1,8 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Server, KeyRound, Save, RefreshCw } from 'lucide-react';
-import { Card, Field, Button, Pill, Banner } from '../../components/ui';
-import { useToast } from '../../components/Toast';
-import { getMcpStatus, saveMcpConfig, refreshMcpTools } from '../../lib/api';
+import { Card, Field, Button, Pill, Banner, useToast, getMcpStatus, saveMcpConfig, refreshMcpTools } from '@nexus/ui';
 
 export default function McpCard() {
   const toast = useToast();

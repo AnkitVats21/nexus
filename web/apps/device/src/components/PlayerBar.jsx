@@ -4,12 +4,10 @@ import {
   Play, Pause, SkipBack, SkipForward, Repeat, Repeat1, Radio, Volume2, Volume1, VolumeX, Loader2,
   RotateCcw, RotateCw, Square, ExternalLink,
 } from 'lucide-react';
-import CommitSlider from './CommitSlider';
+import { CommitSlider, IconButton, formatClock } from '@nexus/ui';
 import OutputPicker from './OutputPicker';
-import { IconButton } from './ui';
 import { TrackArt, useTrackInfo } from './Track';
 import { useNexus } from '../DeviceContext';
-import { formatClock } from '../lib/format';
 import { looksLikeVideoId } from '../lib/trackMetadata';
 
 const REPEAT_LABELS = ['Repeat: off', 'Repeat: this track', 'Repeat: all'];

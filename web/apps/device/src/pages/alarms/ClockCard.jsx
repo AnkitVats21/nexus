@@ -1,9 +1,6 @@
 import React, { useState } from 'react';
 import { Clock, RefreshCw, Settings2, TriangleAlert } from 'lucide-react';
-import { Banner, Button, Card, Field, IconButton } from '../../components/ui';
-import { useToast } from '../../components/Toast';
-import { setTime, syncTime } from '../../lib/api';
-import { pad2 } from '../../lib/format';
+import { Banner, Button, Card, Field, IconButton, useToast, setTime, syncTime, pad2 } from '@nexus/ui';
 import { formatUntil } from '../../lib/schedule';
 
 const SOURCES = { ntp: 'synced from the internet', manual: 'set by hand', none: 'not set' };

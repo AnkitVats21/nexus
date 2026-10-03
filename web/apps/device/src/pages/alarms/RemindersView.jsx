@@ -1,9 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import clsx from 'clsx';
 import { BellRing, Check, Pencil, Plus, Save, StickyNote, Trash2, X, Zap } from 'lucide-react';
-import { Button, Card, Empty, Field, IconButton, Pill, Switch } from '../../components/ui';
-import { useToast } from '../../components/Toast';
-import { ackReminder, deleteReminder, saveReminder } from '../../lib/api';
+import { Button, Card, Empty, Field, IconButton, Pill, Switch, useToast, ackReminder, deleteReminder, saveReminder } from '@nexus/ui';
 import { daysLabel, formatUntil, formatWhen, timeOf } from '../../lib/schedule';
 import { WhenFields, whenFromItem, whenToFields } from './WhenFields';
 

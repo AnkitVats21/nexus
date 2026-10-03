@@ -2,7 +2,7 @@
 // days (bit0 Mon .. bit6 Sun; 0 = once) and at (epoch seconds of a fixed
 // one-time fire; 0 = the next hour:minute). The device works out next_fire.
 
-import { pad2 } from './format';
+import { pad2 } from '@nexus/ui';
 
 export const DAY_NAMES = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 export const EVERY_DAY = 0x7f;
