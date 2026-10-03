@@ -320,6 +320,10 @@ func (h *Hub) handleUsersGet(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
+	if u.MustChange {
+		writeError(w, http.StatusForbidden, "password change required")
+		return
+	}
 	if u.Role != "admin" {
 		writeError(w, http.StatusForbidden, "admin role required")
 		return
@@ -351,6 +355,10 @@ func (h *Hub) handleUsersPost(w http.ResponseWriter, r *http.Request) {
 	u, _, err := h.authenticate(r)
 	if err != nil || u == nil {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if u.MustChange {
+		writeError(w, http.StatusForbidden, "password change required")
 		return
 	}
 	if u.Role != "admin" {
@@ -420,6 +428,10 @@ func (h *Hub) handleUserResetPost(w http.ResponseWriter, r *http.Request, target
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
+	if u.MustChange {
+		writeError(w, http.StatusForbidden, "password change required")
+		return
+	}
 	if u.Role != "admin" {
 		writeError(w, http.StatusForbidden, "admin role required")
 		return
@@ -468,6 +480,10 @@ func (h *Hub) handleUserDelete(w http.ResponseWriter, r *http.Request, targetID 
 	u, _, err := h.authenticate(r)
 	if err != nil || u == nil {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if u.MustChange {
+		writeError(w, http.StatusForbidden, "password change required")
 		return
 	}
 	if u.Role != "admin" {

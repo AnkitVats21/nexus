@@ -5,9 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"nexus/pkg/auth"
+	"nexus/pkg/store"
 	"os"
 	"path/filepath"
 	"strings"
@@ -301,6 +303,15 @@ func TestAuthMiddlewareOnExistingRoutes(t *testing.T) {
 		"password": tempPass,
 	}, nil)
 	memberCookie := findCookie(res.Cookies(), auth.SessionCookieName)
+
+	// Member must change temporary password to clear must_change restriction
+	res, _ = doJSON(t, srv, http.MethodPost, "/hub/api/me/password", map[string]string{
+		"current": tempPass,
+		"new":     "NewMemberSecret123!",
+	}, memberCookie)
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 on /hub/api/me/password, got %d", res.StatusCode)
+	}
 
 	// --- /hub/status ---
 	// Unauthenticated: 401
@@ -653,4 +664,127 @@ func TestAPIProxyWritesOriginCheck(t *testing.T) {
 	if res.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("expected 503 board offline for valid POST /api/ota, got %d", res.StatusCode)
 	}
+}
+
+func TestMustChangeEnforcement(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	h, srv, cleanup := newAuthTestHub(t)
+	defer cleanup()
+
+	// Initial setup
+	setupBody := `{"setup_code":"` + h.auth.SetupCode() + `","username":"admin","display_name":"Admin","password":"admin-password123"}`
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/hub/api/setup", strings.NewReader(setupBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", srv.URL)
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	var adminCookie *http.Cookie
+	for _, c := range res.Cookies() {
+		if c.Name == auth.SessionCookieName {
+			adminCookie = c
+			break
+		}
+	}
+
+	// Create user with must_change: true
+	createReq := `{"username":"newuser","role":"member"}`
+	req, _ = http.NewRequest(http.MethodPost, srv.URL+"/hub/api/users", strings.NewReader(createReq))
+	req.AddCookie(adminCookie)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", srv.URL)
+	res, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	var createResp struct {
+		User         store.User `json:"user"`
+		TempPassword string     `json:"temp_password"`
+	}
+	json.NewDecoder(res.Body).Decode(&createResp)
+	res.Body.Close()
+
+	if !createResp.User.MustChange {
+		t.Fatal("expected newUser.MustChange to be true")
+	}
+
+	// Login as newuser
+	loginReq := `{"username":"newuser","password":"` + createResp.TempPassword + `"}`
+	req, _ = http.NewRequest(http.MethodPost, srv.URL+"/hub/api/login", strings.NewReader(loginReq))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", srv.URL)
+	res, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("login as new user: %v", err)
+	}
+	var userCookie *http.Cookie
+	for _, c := range res.Cookies() {
+		if c.Name == auth.SessionCookieName {
+			userCookie = c
+			break
+		}
+	}
+	res.Body.Close()
+	if userCookie == nil {
+		t.Fatal("missing session cookie for newuser")
+	}
+
+	// 1. GET /hub/api/me is allowed
+	req, _ = http.NewRequest(http.MethodGet, srv.URL+"/hub/api/me", nil)
+	req.AddCookie(userCookie)
+	res, err = http.DefaultClient.Do(req)
+	if err != nil || res.StatusCode != http.StatusOK {
+		t.Fatalf("expected GET /hub/api/me to return 200, got %v status=%d", err, res.StatusCode)
+	}
+	res.Body.Close()
+
+	// 2. GET /api/status returns 403 {"error":"password change required"}
+	req, _ = http.NewRequest(http.MethodGet, srv.URL+"/api/status", nil)
+	req.AddCookie(userCookie)
+	res, err = http.DefaultClient.Do(req)
+	if err != nil || res.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected GET /api/status to return 403, got %v status=%d", err, res.StatusCode)
+	}
+	body, _ := io.ReadAll(res.Body)
+	res.Body.Close()
+	if !strings.Contains(string(body), "password change required") {
+		t.Fatalf("expected error 'password change required', got %s", string(body))
+	}
+
+	// 3. WS /api/ws returns 403
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/api/ws"
+	opts := &websocket.DialOptions{
+		HTTPHeader: http.Header{
+			"Cookie": []string{userCookie.String()},
+			"Origin": []string{srv.URL},
+		},
+	}
+	_, _, err = websocket.Dial(ctx, wsURL, opts)
+	if err == nil {
+		t.Fatal("expected websocket connection to be rejected when must_change is true")
+	}
+
+	// 4. POST /hub/api/me/password to change password is allowed
+	changeBody := `{"current":"` + createResp.TempPassword + `","new":"BrandNewPassword123!"}`
+	req, _ = http.NewRequest(http.MethodPost, srv.URL+"/hub/api/me/password", strings.NewReader(changeBody))
+	req.AddCookie(userCookie)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", srv.URL)
+	res, err = http.DefaultClient.Do(req)
+	if err != nil || res.StatusCode != http.StatusOK {
+		t.Fatalf("expected POST /hub/api/me/password to succeed, got %v status=%d", err, res.StatusCode)
+	}
+	res.Body.Close()
+
+	// 5. Now GET /api/status passes must_change check (returns 503 board offline instead of 403)
+	req, _ = http.NewRequest(http.MethodGet, srv.URL+"/api/status", nil)
+	req.AddCookie(userCookie)
+	res, err = http.DefaultClient.Do(req)
+	if err != nil || res.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("expected GET /api/status to return 503 board offline after password change, got %v status=%d", err, res.StatusCode)
+	}
+	res.Body.Close()
 }

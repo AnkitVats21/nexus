@@ -535,6 +535,10 @@ func (h *Hub) serveBrowser(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 			return
 		}
+		if u.MustChange {
+			http.Error(w, `{"error":"password change required"}`, http.StatusForbidden)
+			return
+		}
 	}
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
 	if err != nil {
@@ -682,6 +686,10 @@ func (h *Hub) serveAPI(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
+		if u.MustChange {
+			writeError(w, http.StatusForbidden, "password change required")
+			return
+		}
 
 		switch r.Method {
 		case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
@@ -729,6 +737,10 @@ func (h *Hub) serveStatus(w http.ResponseWriter, r *http.Request) {
 		u, _, err := h.authenticate(r)
 		if err != nil || u == nil {
 			writeError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		if u.MustChange {
+			writeError(w, http.StatusForbidden, "password change required")
 			return
 		}
 		if u.Role != "admin" {
