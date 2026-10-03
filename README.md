@@ -25,6 +25,8 @@ nexus/
 │   ├── transport/              # WebSocket client transport & pingers
 │   ├── protocol/               # Binary & JSON message protocol definitions
 │   ├── resolver/               # Pluggable audio URL resolver (direct vs invidious)
+│   ├── store/                  # SQLite storage, schema migrations, and user/device models
+│   ├── auth/                   # Argon2id password hashing, sessions, CSRF, and rate limiting
 │   └── tools/                  # Nexus MCP tool implementations & registry
 ├── config/                     # Configuration parsers and structures
 ├── web/                        # NPM workspace for frontend apps and libraries

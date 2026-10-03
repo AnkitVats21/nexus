@@ -244,3 +244,37 @@ sees it, port `state.http_port`).
 version it knows and answers with the lowest of the two. New optional fields
 and new message types do not change the version: both sides ignore types and
 fields they don't know.
+
+## 8. Hub HTTP API & Authentication (`/hub/api/*`)
+
+All JSON, under `/hub/api/`. Unauthenticated requests to protected endpoints return `401 Unauthorized` (`{"error": "unauthorized"}`).
+
+### 8.1 Authentication & Sessions
+- **Session Cookie**: `nexus_session` stores a 32-byte base64url token. The SQLite database stores only the SHA-256 checksum (`sessions.id_hash`).
+- **Cookie Attributes**: `HttpOnly`, `SameSite=Lax`, `Path=/`, `Secure` when served over direct HTTPS or via trusted reverse proxy (`--trusted-proxy`). Sliding idle expiration of 30 days.
+- **CSRF Protection**: All state-changing requests (`POST`, `PUT`, `PATCH`, `DELETE`) require `Content-Type: application/json` and an `Origin` (or `Referer`) matching the hub's host or `--public-url`.
+- **Rate Limits**:
+  - Login: 5 failed attempts per username or IP in 15 minutes triggers a 15-minute lockout (returns `401 {"error": "invalid username or password"}`).
+  - Setup code: 10 failed attempts per IP in 10 minutes triggers `429 Too Many Requests`.
+  - Constant-time auth delays: `/hub/api/setup`, `/hub/api/login`, and `/hub/api/me/password` take at least 300 ms.
+
+### 8.2 Endpoints Table
+
+| Method & Path | Access | Description |
+|---|---|---|
+| `GET /hub/api/setup` | Public | Returns `{"needed": true/false}` depending on whether any users exist. |
+| `POST /hub/api/setup` | Public (first run only) | `{setup_code, username, display_name, password}` → Creates first admin, starts session. |
+| `POST /hub/api/login` | Public | `{username, password}` → Verifies credentials, sets `nexus_session` cookie, returns `{user}`. |
+| `POST /hub/api/logout` | Authenticated | Deletes session in DB and clears cookie. |
+| `GET /hub/api/me` | Authenticated | Returns `{id, username, display_name, role, must_change}`. |
+| `POST /hub/api/me/password` | Authenticated | `{current, new}` → Updates password, revokes all other sessions. |
+| `GET /hub/api/users` | Admin only | Returns list of all users. |
+| `POST /hub/api/users` | Admin only | `{username, display_name, role}` → Creates user with temporary password and `must_change: true`. |
+| `POST /hub/api/users/{id}/reset` | Admin only | Generates new temporary password, updates `must_change: true`, revokes user's sessions. |
+| `DELETE /hub/api/users/{id}` | Admin only | Deletes user (cannot delete self or last admin). |
+
+### 8.3 Existing Routes Auth Policy
+- `/hub/status`: Admin only (`401` if unauthenticated, `403` if not admin).
+- `/api/ws` and `/api/*`: Authenticated user session required.
+- `/hub/cache/*`: Open on LAN for edge audio streaming.
+
