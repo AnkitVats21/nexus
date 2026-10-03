@@ -461,3 +461,28 @@ func TestConcurrentSetupRace(t *testing.T) {
 		t.Fatalf("expected %d requests to fail with setup not needed or code consumed, got %d", n-1, setupNotNeeded)
 	}
 }
+
+func TestRateLimiterPruning(t *testing.T) {
+	rl := NewRateLimiter()
+
+	// 1. Add failures
+	for i := 0; i < 20; i++ {
+		rl.RecordLoginFailure(fmt.Sprintf("user-%d", i), fmt.Sprintf("192.168.2.%d", i))
+	}
+	if count := rl.EntryCount(); count == 0 {
+		t.Fatal("expected non-zero entry count")
+	}
+
+	// 2. Prune with current time (entries still valid) -> nothing pruned
+	rl.Prune(time.Now())
+	if count := rl.EntryCount(); count == 0 {
+		t.Fatal("expected entries to remain valid before expiration")
+	}
+
+	// 3. Prune with time after expiration window (now + 20 minutes)
+	future := time.Now().Add(20 * time.Minute)
+	rl.Prune(future)
+	if count := rl.EntryCount(); count != 0 {
+		t.Fatalf("expected all expired entries to be pruned, got %d", count)
+	}
+}

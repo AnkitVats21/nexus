@@ -28,6 +28,9 @@ const (
 	PairingGlobalMaxFailures = 100
 
 	AuthMinDuration = 300 * time.Millisecond
+
+	MaxRateLimitEntries = 10000
+	PruneInterval       = 5 * time.Minute
 )
 
 // RateLimiter manages in-memory rate limiting and lockouts for authentication.
@@ -38,6 +41,7 @@ type RateLimiter struct {
 	setupFailures   map[string][]time.Time // key: ip
 	pairingFailures map[string][]time.Time // key: ip
 	globalPairing   []time.Time
+	lastPrune       time.Time
 }
 
 // NewRateLimiter initializes an in-memory RateLimiter.
@@ -46,6 +50,7 @@ func NewRateLimiter() *RateLimiter {
 		loginFailures:   make(map[string][]time.Time),
 		setupFailures:   make(map[string][]time.Time),
 		pairingFailures: make(map[string][]time.Time),
+		lastPrune:       time.Now(),
 	}
 }
 
@@ -58,6 +63,65 @@ func pruneTimestamps(history []time.Time, window time.Duration, now time.Time) [
 	return history[idx:]
 }
 
+func (rl *RateLimiter) pruneMapLocked(m map[string][]time.Time, window time.Duration, now time.Time) {
+	for k, history := range m {
+		valid := pruneTimestamps(history, window, now)
+		if len(valid) == 0 {
+			delete(m, k)
+		} else {
+			m[k] = valid
+		}
+	}
+}
+
+func (rl *RateLimiter) pruneLocked(now time.Time) {
+	rl.lastPrune = now
+	rl.pruneMapLocked(rl.loginFailures, LoginWindow, now)
+	rl.pruneMapLocked(rl.setupFailures, SetupWindow, now)
+	rl.pruneMapLocked(rl.pairingFailures, PairingWindow, now)
+	rl.globalPairing = pruneTimestamps(rl.globalPairing, PairingWindow, now)
+
+	// If map still exceeds MaxRateLimitEntries after expired prune, evict entries to cap size
+	if len(rl.loginFailures) > MaxRateLimitEntries {
+		for k := range rl.loginFailures {
+			delete(rl.loginFailures, k)
+			if len(rl.loginFailures) <= MaxRateLimitEntries {
+				break
+			}
+		}
+	}
+	if len(rl.setupFailures) > MaxRateLimitEntries {
+		for k := range rl.setupFailures {
+			delete(rl.setupFailures, k)
+			if len(rl.setupFailures) <= MaxRateLimitEntries {
+				break
+			}
+		}
+	}
+	if len(rl.pairingFailures) > MaxRateLimitEntries {
+		for k := range rl.pairingFailures {
+			delete(rl.pairingFailures, k)
+			if len(rl.pairingFailures) <= MaxRateLimitEntries {
+				break
+			}
+		}
+	}
+}
+
+// Prune removes empty and expired keys across all failure maps.
+func (rl *RateLimiter) Prune(now time.Time) {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	rl.pruneLocked(now)
+}
+
+// EntryCount returns the total number of tracked keys across all rate limit maps.
+func (rl *RateLimiter) EntryCount() int {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	return len(rl.loginFailures) + len(rl.setupFailures) + len(rl.pairingFailures)
+}
+
 // LoginAllowed checks if neither username nor IP is locked out.
 func (rl *RateLimiter) LoginAllowed(username, ip string) bool {
 	rl.mu.Lock()
@@ -67,14 +131,24 @@ func (rl *RateLimiter) LoginAllowed(username, ip string) bool {
 	uKey := "u:" + username
 	ipKey := "ip:" + cleanIP(ip)
 
-	rl.loginFailures[uKey] = pruneTimestamps(rl.loginFailures[uKey], LoginWindow, now)
-	if len(rl.loginFailures[uKey]) >= LoginMaxFailures {
-		return false
+	validU := pruneTimestamps(rl.loginFailures[uKey], LoginWindow, now)
+	if len(validU) == 0 {
+		delete(rl.loginFailures, uKey)
+	} else {
+		rl.loginFailures[uKey] = validU
+		if len(validU) >= LoginMaxFailures {
+			return false
+		}
 	}
 
-	rl.loginFailures[ipKey] = pruneTimestamps(rl.loginFailures[ipKey], LoginWindow, now)
-	if len(rl.loginFailures[ipKey]) >= LoginMaxFailures {
-		return false
+	validIP := pruneTimestamps(rl.loginFailures[ipKey], LoginWindow, now)
+	if len(validIP) == 0 {
+		delete(rl.loginFailures, ipKey)
+	} else {
+		rl.loginFailures[ipKey] = validIP
+		if len(validIP) >= LoginMaxFailures {
+			return false
+		}
 	}
 
 	return true
@@ -86,6 +160,10 @@ func (rl *RateLimiter) RecordLoginFailure(username, ip string) {
 	defer rl.mu.Unlock()
 
 	now := time.Now()
+	if len(rl.loginFailures) >= MaxRateLimitEntries || now.Sub(rl.lastPrune) >= PruneInterval {
+		rl.pruneLocked(now)
+	}
+
 	uKey := "u:" + username
 	ipKey := "ip:" + cleanIP(ip)
 
@@ -109,8 +187,13 @@ func (rl *RateLimiter) SetupCodeAllowed(ip string) bool {
 
 	now := time.Now()
 	ip = cleanIP(ip)
-	rl.setupFailures[ip] = pruneTimestamps(rl.setupFailures[ip], SetupWindow, now)
-	return len(rl.setupFailures[ip]) < SetupMaxFailures
+	valid := pruneTimestamps(rl.setupFailures[ip], SetupWindow, now)
+	if len(valid) == 0 {
+		delete(rl.setupFailures, ip)
+		return true
+	}
+	rl.setupFailures[ip] = valid
+	return len(valid) < SetupMaxFailures
 }
 
 // RecordSetupFailure records an incorrect setup code attempt from an IP.
@@ -119,6 +202,10 @@ func (rl *RateLimiter) RecordSetupFailure(ip string) {
 	defer rl.mu.Unlock()
 
 	now := time.Now()
+	if len(rl.setupFailures) >= MaxRateLimitEntries || now.Sub(rl.lastPrune) >= PruneInterval {
+		rl.pruneLocked(now)
+	}
+
 	ip = cleanIP(ip)
 	rl.setupFailures[ip] = append(pruneTimestamps(rl.setupFailures[ip], SetupWindow, now), now)
 }
@@ -138,9 +225,14 @@ func (rl *RateLimiter) PairingCodeAllowed(ip string) bool {
 
 	now := time.Now()
 	ip = cleanIP(ip)
-	rl.pairingFailures[ip] = pruneTimestamps(rl.pairingFailures[ip], PairingWindow, now)
-	if len(rl.pairingFailures[ip]) >= PairingIPMaxFailures {
-		return false
+	valid := pruneTimestamps(rl.pairingFailures[ip], PairingWindow, now)
+	if len(valid) == 0 {
+		delete(rl.pairingFailures, ip)
+	} else {
+		rl.pairingFailures[ip] = valid
+		if len(valid) >= PairingIPMaxFailures {
+			return false
+		}
 	}
 
 	rl.globalPairing = pruneTimestamps(rl.globalPairing, PairingWindow, now)
@@ -153,6 +245,10 @@ func (rl *RateLimiter) RecordPairingFailure(ip string) {
 	defer rl.mu.Unlock()
 
 	now := time.Now()
+	if len(rl.pairingFailures) >= MaxRateLimitEntries || now.Sub(rl.lastPrune) >= PruneInterval {
+		rl.pruneLocked(now)
+	}
+
 	ip = cleanIP(ip)
 	rl.pairingFailures[ip] = append(pruneTimestamps(rl.pairingFailures[ip], PairingWindow, now), now)
 	rl.globalPairing = append(pruneTimestamps(rl.globalPairing, PairingWindow, now), now)
