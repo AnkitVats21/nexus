@@ -8,8 +8,8 @@ import (
 	"reflect"
 	"testing"
 
-	"nexus/pkg/tools"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"nexus/pkg/tools"
 )
 
 func normJSON(t *testing.T, v any) any {
