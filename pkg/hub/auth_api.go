@@ -2,6 +2,7 @@ package hub
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"nexus/pkg/auth"
@@ -21,6 +22,24 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
 }
 
+func readJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
+			return false
+		}
+		writeError(w, http.StatusBadRequest, "failed to read request body")
+		return false
+	}
+	if err := json.Unmarshal(body, dst); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request json")
+		return false
+	}
+	return true
+}
+
 func (h *Hub) authenticate(r *http.Request) (*store.User, *store.Session, error) {
 	if h.auth == nil {
 		return nil, nil, nil
@@ -37,6 +56,8 @@ func (h *Hub) registerAuthRoutes(mux *http.ServeMux) {
 }
 
 func (h *Hub) serveHubAPI(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
+
 	path := strings.TrimPrefix(r.URL.Path, "/hub/api")
 	if path == "" || path == "/" {
 		http.NotFound(w, r)
@@ -142,9 +163,7 @@ func (h *Hub) handleSetupPost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req setupReq
-	body, err := io.ReadAll(r.Body)
-	if err != nil || json.Unmarshal(body, &req) != nil {
-		writeError(w, http.StatusBadRequest, "invalid request json")
+	if !readJSON(w, r, &req) {
 		return
 	}
 
@@ -187,9 +206,7 @@ func (h *Hub) handleLoginPost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req loginReq
-	body, err := io.ReadAll(r.Body)
-	if err != nil || json.Unmarshal(body, &req) != nil {
-		writeError(w, http.StatusBadRequest, "invalid request json")
+	if !readJSON(w, r, &req) {
 		return
 	}
 
@@ -269,9 +286,7 @@ func (h *Hub) handleMePasswordPost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req changePasswordReq
-	body, err := io.ReadAll(r.Body)
-	if err != nil || json.Unmarshal(body, &req) != nil {
-		writeError(w, http.StatusBadRequest, "invalid request json")
+	if !readJSON(w, r, &req) {
 		return
 	}
 
@@ -332,9 +347,7 @@ func (h *Hub) handleUsersPost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req createUserReq
-	body, err := io.ReadAll(r.Body)
-	if err != nil || json.Unmarshal(body, &req) != nil {
-		writeError(w, http.StatusBadRequest, "invalid request json")
+	if !readJSON(w, r, &req) {
 		return
 	}
 

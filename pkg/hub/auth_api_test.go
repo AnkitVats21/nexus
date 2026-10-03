@@ -531,3 +531,24 @@ func TestBrowserWSOriginValidation(t *testing.T) {
 	}
 	conn.Close(websocket.StatusNormalClosure, "")
 }
+
+func TestHubAPIBodySizeLimit(t *testing.T) {
+	_, srv, cleanup := newAuthTestHub(t)
+	defer cleanup()
+
+	// Payload > 16 KiB (e.g. 20 KiB): rejected with 413 Request Entity Too Large
+	largePayload := `{"username":"` + strings.Repeat("a", 20*1024) + `","password":"foo"}`
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/hub/api/login", strings.NewReader(largePayload))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", srv.URL)
+
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer res.Body.Close()
+
+	if res.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected 413 Request Entity Too Large for >16 KiB body, got %d", res.StatusCode)
+	}
+}
