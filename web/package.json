@@ -1,0 +1,8 @@
+{
+  "name": "nexus-web",
+  "private": true,
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ]
+}

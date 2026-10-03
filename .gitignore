@@ -6,6 +6,10 @@
 *.dylib
 bin/
 dist/
+**/dist/
+node_modules/
+**/node_modules/
+*.bin
 /orbit
 
 # Test binary, built with `go test -c`
@@ -18,8 +22,10 @@ dist/
 go.work
 
 # Environment and secrets
-.env
-.env.local
+.env*
+*.key
+*.pem
+tokens.json
 
 # Operating System files
 .DS_Store

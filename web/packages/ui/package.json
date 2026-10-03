@@ -1,0 +1,28 @@
+{
+  "name": "@nexus/ui",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./components/ui": "./src/components/ui.jsx",
+    "./components/Toast": "./src/components/Toast.jsx",
+    "./components/CommitSlider": "./src/components/CommitSlider.jsx",
+    "./lib/api": "./src/lib/api.js",
+    "./lib/ndb": "./src/lib/ndb.js",
+    "./lib/ndb_schema": "./src/lib/ndb_schema.js",
+    "./lib/format": "./src/lib/format.js",
+    "./hooks/useDevice": "./src/hooks/useDevice.js"
+  },
+  "dependencies": {
+    "clsx": "^2.1.1",
+    "lucide-react": "^0.475.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.8",
+    "@types/react-dom": "^19.0.3"
+  }
+}
