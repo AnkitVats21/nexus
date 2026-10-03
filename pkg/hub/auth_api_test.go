@@ -1243,6 +1243,17 @@ func TestDeviceEndpointsAndProxyOwnership(t *testing.T) {
 		t.Fatalf("expected 200 with board ok for owner, got status=%d body=%s", res.StatusCode, string(body))
 	}
 
+	// Non-api paths under /hub/d/{id}/ (e.g. index.html or path traversal) are NOT forwarded (404)
+	res, _ = doJSON(t, srv, http.MethodGet, "/hub/d/nexus-alice-1/index.html", nil, aliceCookie)
+	if res.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404 for non-api path /hub/d/nexus-alice-1/index.html, got %d", res.StatusCode)
+	}
+
+	res, _ = doJSON(t, srv, http.MethodGet, "/hub/d/nexus-alice-1/../x", nil, aliceCookie)
+	if res.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404 for traversed path /hub/d/nexus-alice-1/../x, got %d", res.StatusCode)
+	}
+
 	// 5. Existing /api/ proxy and /api/ws (nexus-alice-1 is h.board)
 	// Bob requests /api/state -> 403 Forbidden
 	res, _ = doJSON(t, srv, http.MethodGet, "/api/state", nil, bobCookie)

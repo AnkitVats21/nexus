@@ -28,6 +28,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -879,7 +880,12 @@ func newProxy(target *url.URL) *httputil.ReverseProxy {
 
 func (h *Hub) serveDeviceProxy(w http.ResponseWriter, r *http.Request) {
 	// Format: /hub/d/{id}/api/...
-	rest := strings.TrimPrefix(r.URL.Path, "/hub/d/")
+	cleanPath := path.Clean(r.URL.Path)
+	if !strings.HasPrefix(cleanPath, "/hub/d/") {
+		http.NotFound(w, r)
+		return
+	}
+	rest := strings.TrimPrefix(cleanPath, "/hub/d/")
 	parts := strings.SplitN(rest, "/", 2)
 	deviceID := parts[0]
 	if deviceID == "" || len(parts) < 2 {
@@ -887,6 +893,10 @@ func (h *Hub) serveDeviceProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	subPath := "/" + parts[1]
+	if subPath != "/api" && !strings.HasPrefix(subPath, "/api/") {
+		http.NotFound(w, r)
+		return
+	}
 
 	if h.auth != nil {
 		u, _, err := h.authenticate(r)
