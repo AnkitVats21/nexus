@@ -363,3 +363,23 @@ func TestClientIPAndRateLimitPorts(t *testing.T) {
 		t.Fatalf("expected 192.168.1.101:9999 to be allowed")
 	}
 }
+
+func TestUnknownUserDummyVerification(t *testing.T) {
+	_, svc, cleanup := newTestStoreAndAuth(t)
+	defer cleanup()
+
+	// Verify that dummyPasswordHash is valid argon2id format and fails verification cleanly
+	ok, err := VerifyPassword("arbitrary-password", dummyPasswordHash)
+	if err != nil {
+		t.Fatalf("expected dummy hash to parse correctly, got err=%v", err)
+	}
+	if ok {
+		t.Fatal("expected dummy hash verification to return false")
+	}
+
+	// Login with non-existent user should fail with ErrInvalidCredentials
+	_, _, _, err = svc.Login(context.Background(), "nonexistent-user", "password123!", "ua", "127.0.0.1")
+	if err != ErrInvalidCredentials {
+		t.Fatalf("expected ErrInvalidCredentials, got %v", err)
+	}
+}

@@ -25,6 +25,10 @@ var (
 	ErrCannotDeleteLastAdmin = errors.New("cannot delete last admin user")
 )
 
+// dummyPasswordHash is a pre-computed valid Argon2id hash used to prevent timing
+// side-channels when authenticating non-existent usernames.
+const dummyPasswordHash = "$argon2id$v=19$m=65536,t=3,p=2$OcmZvIua+ASMMohB+hBYvw$XWtmVOa87Y7yBi7/JOhrLJM+fDFSufieY7suNIUljKY"
+
 // Service coordinates authentication, session management, password hashing, and rate limiting.
 type Service struct {
 	store        *store.Store
@@ -206,6 +210,7 @@ func (s *Service) Login(ctx context.Context, username, password, userAgent, ip s
 
 	u, err := s.store.GetUserByUsername(ctx, username)
 	if err != nil {
+		_, _ = VerifyPassword(password, dummyPasswordHash)
 		s.rateLimiter.RecordLoginFailure(username, ip)
 		return nil, "", time.Time{}, ErrInvalidCredentials
 	}
