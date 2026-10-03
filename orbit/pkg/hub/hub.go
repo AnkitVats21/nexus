@@ -70,8 +70,9 @@ type Config struct {
 	GeminiURL string
 	// Voice uplink format: auto|pcm|opus (default "auto")
 	Uplink string
-	// Remote tools for voice sessions (nil = none).
-	MCP *MCPClient
+	// Tools for voice sessions: the local ones, the remote MCP server's, or
+	// both (ToolSet); nil = none.
+	MCP Tools
 	// How far ahead of playback the reply is sent (defaultVoiceLead).
 	VoiceLead time.Duration
 	// Where songs are looked up (nil = the hub doesn't run the music).
@@ -160,6 +161,9 @@ func New(cfg Config) *Hub {
 	}
 	if cfg.GeminiURL == "" {
 		cfg.GeminiURL = DefaultGeminiURL
+	}
+	if m, ok := cfg.MCP.(*MCPClient); cfg.MCP == nil || (ok && m == nil) {
+		cfg.MCP = noTools{}
 	}
 	if cfg.VoiceLead <= 0 {
 		cfg.VoiceLead = defaultVoiceLead

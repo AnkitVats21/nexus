@@ -252,11 +252,29 @@ phase 1 is the link and the dashboard, phase 2 voice sessions:
   says `voice: false` and the board stays direct.
 - Edges and music (`pkg/hub/music.go`, `tracks.go`; phase 3): an edge says
   its roles in the hello (`docs/PROTOCOL.md`). The hub owns the queue and
-  picks the player; lookups go through nexus-mcp `music_track`, with
-  invidious-daemon as the fallback, and the next song's stream URL is
+  picks the player; lookups go through the music tools (in-process, then
+  the MCP server, then invidious-daemon directly), and the next song's stream URL is
   fetched ahead. In a hub voice session the music tools (`play`,
   `playback`, `music_output`) run here. A proto 1 board (no roles) keeps
   its own music.
+- Local tools (`pkg/hub/tools.go`): the hub runs nexus-mcp's tools (news,
+  weather, web search, the device-only music lookups) in its own process,
+  from the shared Go package `github.com/AnkitVats21/nexus-mcp/tools` (one
+  registry, which the standalone MCP server also registers from, so the two
+  cannot drift). The voice session and the music lookups use the `Tools`
+  interface (declarations, has, call, call-structured). `MCPClient` (remote)
+  and `LocalTools` both satisfy it; `ToolSet` sends a call to the local tool
+  when there is one and to the remote server otherwise, so a tool only the
+  remote server has still works. With `--local-tools=false` everything goes
+  to the remote server as before. The standalone `nexus-mcp` on a server
+  stays the board's tool source when the hub is away. A local tool without
+  its config is not run here (`web_search` without a Gemini key, the music
+  tools without a music API URL), so the remote server serves it. Device-only
+  tools (`_meta` `nexus/device_only`) stay hidden from Gemini either way.
+  The Gemini key is read from `--gemini-key-file` at call time and goes in a
+  request header only; tool errors carry no key. Startup logs the local and
+  the remote-only tool names. Build note: `go.mod` replaces the module with
+  `../nexus-mcp`, so that repo must sit next to this one.
 - Music cache (`pkg/hub/cache.go`): every song the hub looks up a stream for
   is saved (downloaded with a Range header, as the board does, or YouTube
   throttles it). A saved song goes to any player as
@@ -273,11 +291,13 @@ phase 1 is the link and the dashboard, phase 2 voice sessions:
 | `--mdns-iface` | LAN interfaces | Interfaces to advertise on, comma-separated |
 | `--gemini-key-file` | `~/.config/nexus/gemini_key` | Gemini API key (first line); missing = no voice through the hub |
 | `--uplink` | `auto` | Voice uplink format: `auto`, `pcm`, or `opus` (negotiated with edge) |
-| `--mcp-url` | `$NEXUS_MCP_URL` | MCP server for voice tools; empty = none |
+| `--mcp-url` | `$NEXUS_MCP_URL` | MCP server for voice tools the hub does not run itself (all of them with `--local-tools=false`); empty = none |
 | `--mcp-token-file` | `~/.config/nexus/mcp_token` | MCP bearer token |
 | `--mcp-max-tools` | 32 | Most MCP tools offered to Gemini |
-| `--music` | `true` | Run the music for the edges (needs `--mcp-url` or `--invidious-url`) |
-| `--invidious-url` | `$NEXUS_INVIDIOUS_URL` | Invidious-compatible API (invidious-daemon) for music lookups, used after MCP fails |
+| `--local-tools` | `true` | Run nexus-mcp's tools in-process; the MCP server serves only the tools not run here |
+| `--music-api` | `$NEXUS_MCP_MUSIC_API`, else `--invidious-url` | Invidious-compatible API for the local music tools; none = music lookups go to MCP |
+| `--music` | `true` | Run the music for the edges (needs local music tools, `--mcp-url` or `--invidious-url`) |
+| `--invidious-url` | `$NEXUS_INVIDIOUS_URL` | Invidious-compatible API (invidious-daemon) for music lookups, last in the music chain, after the local tools and MCP |
 | `--cache-dir` | `~/.cache/nexus-hub/music` | Songs kept for the players, served at `/hub/cache/<id>.webm` |
 | `--cache-max-mb` | 2048 | Music cache size; the least recently played go first (0 = no cache) |
 

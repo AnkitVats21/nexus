@@ -76,6 +76,14 @@ func (c *MCPClient) Declarations(ctx context.Context, skip map[string]bool, buil
 		c.log.Warn("MCP tools unavailable", "err", err)
 		return nil
 	}
+	return buildDeclarations(tools, skip, builtinSearch, c.maxTools)
+}
+
+// buildDeclarations turns tool descriptions into Gemini function
+// declarations, leaving out the ones the voice model is not offered:
+// device-only tools, names in skip, bad names, web_search when Gemini
+// searches by itself; then the board's limits on count and size.
+func buildDeclarations(tools []mcpTool, skip map[string]bool, builtinSearch bool, maxTools int) []map[string]any {
 	var out []map[string]any
 	total := 0
 	for _, t := range tools {
@@ -88,7 +96,7 @@ func (c *MCPClient) Declarations(ctx context.Context, skip map[string]bool, buil
 		if builtinSearch && t.Name == "web_search" {
 			continue
 		}
-		if len(out) >= c.maxTools {
+		if len(out) >= maxTools {
 			break
 		}
 		decl := map[string]any{"name": t.Name, "description": t.Description}
@@ -122,9 +130,28 @@ func (c *MCPClient) Has(name string) bool {
 	return false
 }
 
+// ToolNames lists the server's tool names (the cached list, or fetched).
+func (c *MCPClient) ToolNames(ctx context.Context) []string {
+	if c == nil {
+		return nil
+	}
+	tools, err := c.listTools(ctx)
+	if err != nil {
+		return nil
+	}
+	names := make([]string, 0, len(tools))
+	for _, t := range tools {
+		names = append(names, t.Name)
+	}
+	return names
+}
+
 // Call runs a tool and returns the result as the board formats it for
 // Gemini: {"result": joined text, "structuredContent"?} or {"status":"error",...}.
 func (c *MCPClient) Call(ctx context.Context, name string, args json.RawMessage) json.RawMessage {
+	if c == nil {
+		return toolError("no MCP server")
+	}
 	if len(args) == 0 || string(args) == "null" {
 		args = json.RawMessage("{}")
 	}
