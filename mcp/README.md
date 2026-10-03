@@ -18,7 +18,38 @@ Hardware skills (volume, timers, alarms, display) remain in device firmware; dat
   2. `music_track`: one song by `id` or `query` (top result): details, the best Opus `stream_url`, and up to `recommendations` related songs. A video that is gone returns `error: "not_found"` (not a tool error), so the device skips it.
 - **Robustness**: 8-second outbound HTTP timeouts; returns protocol-level `isError` tool results instead of panicking.
 
+## Use as a library
+
+The module path is `github.com/AnkitVats21/nexus-mcp`. The `tools` package
+reads no environment: the caller passes the config in, and the standalone
+server (`main.go`) is one such caller. One registry lists the tools and
+registers them on the MCP server, so an in-process caller (nexus-hub) sees
+exactly what the server serves:
+
+```go
+reg := tools.NewDefaultRegistry(tools.Config{
+    GeminiKeyFile: "/path/to/gemini_key", // or GeminiAPIKey; web_search needs one
+    MusicURL:      "https://music.example", // music_search / music_track
+    // HTTPClient, MusicClient: optional
+})
+for _, t := range reg.Tools() {
+    // t.Name, t.Description, t.InputSchema (JSON schema), t.DeviceOnly
+}
+tool, _ := reg.Get("weather")
+res, err := tool.Call(ctx, json.RawMessage(`{"location":"London"}`))
+// res.Text (voice readout), res.Structured (JSON), res.IsError
+// err is only for arguments that do not decode.
+
+reg.Register(mcpServer) // the same tools on an *mcp.Server
+```
+
+nexus-hub depends on it with a `replace github.com/AnkitVats21/nexus-mcp =>
+../nexus-mcp`; this server stays the tool source for the board when the hub is
+away.
+
 ## Environment Variables
+
+The server reads these in `main.go` and passes them to the tools.
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
