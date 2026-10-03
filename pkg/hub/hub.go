@@ -93,6 +93,8 @@ type Config struct {
 	TrustedProxy string
 	// Public URL of the hub for CSRF and external links (flag --public-url).
 	PublicURL string
+	// Test-only: bypass database and authentication subsystem.
+	NoAuth bool
 }
 
 type Hub struct {
@@ -172,7 +174,7 @@ type helloMsg struct {
 	Roles    *edgeRoles `json:"roles"`
 }
 
-func New(cfg Config) *Hub {
+func New(cfg Config) (*Hub, error) {
 	if cfg.Log == nil {
 		cfg.Log = slog.Default()
 	}
@@ -197,23 +199,35 @@ func New(cfg Config) *Hub {
 		h.music = newMusic(h, cfg.Tracks)
 	}
 
-	if cfg.Auth != nil {
+	if cfg.NoAuth {
+		// Test-only bypass: no store or auth configured
+	} else if cfg.Auth != nil {
 		h.auth = cfg.Auth
 		h.store = cfg.Auth.Store()
 	} else if cfg.Store != nil {
 		h.store = cfg.Store
-		h.auth, _ = auth.NewService(h.store, cfg.TrustedProxy, cfg.PublicURL)
+		authSvc, err := auth.NewService(h.store, cfg.TrustedProxy, cfg.PublicURL)
+		if err != nil {
+			return nil, fmt.Errorf("init auth service: %w", err)
+		}
+		h.auth = authSvc
 	} else if cfg.DBPath != "" {
 		st, err := store.Open(cfg.DBPath)
 		if err != nil {
-			h.log.Error("Failed to open SQLite database", "path", cfg.DBPath, "err", err)
-		} else {
-			h.store = st
-			h.auth, _ = auth.NewService(st, cfg.TrustedProxy, cfg.PublicURL)
+			return nil, fmt.Errorf("open sqlite store %s: %w", cfg.DBPath, err)
 		}
+		h.store = st
+		authSvc, err := auth.NewService(st, cfg.TrustedProxy, cfg.PublicURL)
+		if err != nil {
+			st.Close()
+			return nil, fmt.Errorf("init auth service: %w", err)
+		}
+		h.auth = authSvc
+	} else {
+		return nil, errors.New("auth is required: specify DBPath, Store, or Auth (or NoAuth for tests)")
 	}
 
-	return h
+	return h, nil
 }
 
 // Store returns the storage engine attached to this Hub, or nil.

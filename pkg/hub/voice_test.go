@@ -150,8 +150,11 @@ func boardSetup() map[string]any {
 }
 
 func newVoiceHub(t *testing.T, g *fakeGemini, mcp *MCPClient) *httptest.Server {
-	h := New(Config{Version: "test", Tokens: []string{testToken}, GeminiKey: "gemini-key",
-		GeminiURL: g.url(), MCP: mcp, VoiceLead: 100 * time.Millisecond})
+	h, err := New(Config{Version: "test", Tokens: []string{testToken}, GeminiKey: "gemini-key",
+		GeminiURL: g.url(), MCP: mcp, VoiceLead: 100 * time.Millisecond, NoAuth: true})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
 	srv := httptest.NewServer(h.Handler())
 	t.Cleanup(srv.Close)
 	return srv
@@ -359,7 +362,10 @@ func TestVoiceSearchSetup(t *testing.T) {
 	setup["tools"] = []any{map[string]any{"functionDeclarations": []any{
 		map[string]any{"name": "set_volume"}, map[string]any{"name": "get_weather"}}}}
 	setup["systemInstruction"] = map[string]any{"parts": []any{map[string]any{"text": "Be brief."}}}
-	h := New(Config{GeminiKey: "k"})
+	h, err := New(Config{GeminiKey: "k", NoAuth: true})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
 	v := h.voiceFor("x")
 	v.start = sessionStartMsg{Setup: setup, WebSearch: true}
 	data, gc := v.buildSetupLocked()

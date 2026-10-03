@@ -69,11 +69,15 @@ func (f *fakeTracks) Lookup(ctx context.Context, id, query string, stream bool, 
 }
 
 func newMusicHub(t *testing.T, g *fakeGemini) *httptest.Server {
-	cfg := Config{Version: "test", Tokens: []string{testToken}, Tracks: &fakeTracks{}, VoiceLead: 100 * time.Millisecond}
+	cfg := Config{Version: "test", Tokens: []string{testToken}, Tracks: &fakeTracks{}, VoiceLead: 100 * time.Millisecond, NoAuth: true}
 	if g != nil {
 		cfg.GeminiKey, cfg.GeminiURL = "gemini-key", g.url()
 	}
-	srv := httptest.NewServer(New(cfg).Handler())
+	h, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	srv := httptest.NewServer(h.Handler())
 	t.Cleanup(srv.Close)
 	return srv
 }
@@ -321,7 +325,10 @@ func TestMusicCache(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := New(Config{Version: "test", Tokens: []string{testToken}, Tracks: &cdnTracks{cdn: cdn.URL}, Cache: cache})
+	h, err := New(Config{Version: "test", Tokens: []string{testToken}, Tracks: &cdnTracks{cdn: cdn.URL}, Cache: cache, NoAuth: true})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
 	srv := httptest.NewServer(h.Handler())
 	t.Cleanup(srv.Close)
 	board := connectEdge(t, ctx, srv.URL, "board", boardRoles)

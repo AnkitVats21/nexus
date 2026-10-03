@@ -24,13 +24,17 @@ func newAuthTestHub(t *testing.T) (*Hub, *httptest.Server, func()) {
 		t.Fatalf("MkdirTemp: %v", err)
 	}
 	dbPath := filepath.Join(dir, "hub.db")
-	h := New(Config{
+	h, err := New(Config{
 		Version:      "test",
 		Tokens:       []string{testToken},
 		DBPath:       dbPath,
 		TrustedProxy: "127.0.0.1",
 		PublicURL:    "http://hub.local:8380",
 	})
+	if err != nil {
+		os.RemoveAll(dir)
+		t.Fatalf("New: %v", err)
+	}
 	srv := httptest.NewServer(h.Handler())
 	cleanup := func() {
 		srv.Close()
@@ -386,5 +390,29 @@ func TestCSRFProtection(t *testing.T) {
 	}
 	if res.StatusCode == http.StatusForbidden {
 		t.Fatalf("expected matching Origin to pass CSRF, got 403")
+	}
+}
+
+func TestFailClosedUnopenableDB(t *testing.T) {
+	// An unopenable path (inside a file treated as directory)
+	unopenable := "/dev/null/unopenable.db"
+	_, err := New(Config{
+		Version: "test",
+		Tokens:  []string{testToken},
+		DBPath:  unopenable,
+	})
+	if err == nil {
+		t.Fatal("expected error on unopenable DB path, got nil")
+	}
+}
+
+func TestFailClosedNoAuthWithoutFlag(t *testing.T) {
+	// When neither Auth/Store/DBPath nor NoAuth is set, New must fail closed
+	_, err := New(Config{
+		Version: "test",
+		Tokens:  []string{testToken},
+	})
+	if err == nil {
+		t.Fatal("expected error when auth is not configured, got nil")
 	}
 }

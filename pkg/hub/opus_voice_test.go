@@ -14,14 +14,18 @@ import (
 )
 
 func newVoiceHubWithUplink(t *testing.T, g *fakeGemini, uplink string) *httptest.Server {
-	h := New(Config{
+	h, err := New(Config{
 		Version:   "test",
 		Tokens:    []string{testToken},
 		GeminiKey: "gemini-key",
 		GeminiURL: g.url(),
 		Uplink:    uplink,
 		VoiceLead: 100 * time.Millisecond,
+		NoAuth:    true,
 	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
 	srv := httptest.NewServer(h.Handler())
 	t.Cleanup(srv.Close)
 	return srv

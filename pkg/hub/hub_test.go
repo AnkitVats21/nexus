@@ -61,7 +61,10 @@ func connectBoard(t *testing.T, ctx context.Context, hubURL string, boardHTTP *h
 }
 
 func newTestHub(t *testing.T) (*Hub, *httptest.Server) {
-	h := New(Config{Version: "test", Tokens: []string{testToken}})
+	h, err := New(Config{Version: "test", Tokens: []string{testToken}, NoAuth: true})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
 	srv := httptest.NewServer(h.Handler())
 	t.Cleanup(srv.Close)
 	return h, srv
@@ -180,7 +183,10 @@ func TestDashboardFiles(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "index.html"), []byte("index"), 0o644)
 	os.MkdirAll(filepath.Join(dir, "assets"), 0o755)
 	os.WriteFile(filepath.Join(dir, "assets", "app.js"), []byte("js"), 0o644)
-	h := New(Config{Version: "test", WebDir: dir})
+	h, err := New(Config{Version: "test", WebDir: dir, NoAuth: true})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
 	srv := httptest.NewServer(h.Handler())
 	defer srv.Close()
 

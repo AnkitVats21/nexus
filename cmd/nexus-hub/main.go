@@ -151,9 +151,13 @@ func main() {
 			cache = nil
 		}
 	}
-	h := hub.New(hub.Config{Version: version, Tokens: tokens, WebDir: *webDir, Log: log,
+	h, err := hub.New(hub.Config{Version: version, Tokens: tokens, WebDir: *webDir, Log: log,
 		GeminiKey: geminiKey, Uplink: *uplink, MCP: mcp, Tracks: tracks, Cache: cache,
 		DBPath: *dbPath, TrustedProxy: *trustedProxy, PublicURL: *publicURL})
+	if err != nil {
+		log.Error("Failed to initialize hub", "err", err)
+		os.Exit(1)
+	}
 	srv := &http.Server{Addr: *listen, Handler: h.Handler(), ReadHeaderTimeout: 10 * time.Second}
 
 	ln, err := net.Listen("tcp", *listen)
