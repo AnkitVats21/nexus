@@ -9,8 +9,8 @@ import { readNdb } from './ndb';
 import { NDB_SCHEMAS } from './ndb_schema';
 
 // The device build (`npm run bundle`, served by the ESP itself) talks to the
-// host it was loaded from; dev builds default to the fixed LAN address.
-const DEFAULT_HOST = import.meta.env.MODE === 'device' ? window.location.host : '192.168.1.14';
+// host it was loaded from; dev builds default to VITE_NEXUS_HOST or 'nexus.local'.
+const DEFAULT_HOST = import.meta.env.MODE === 'device' ? window.location.host : (import.meta.env.VITE_NEXUS_HOST || 'nexus.local');
 const STREAM_API_BASE = 'https://stream.ankitm.xyz/api/v1';
 const HOST_KEY = 'nexus_host';
 

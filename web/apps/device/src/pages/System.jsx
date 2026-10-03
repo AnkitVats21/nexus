@@ -310,7 +310,7 @@ function Controls() {
         <form className="inline-row" onSubmit={(e) => { e.preventDefault(); setHost(hostInput); toast(`Connecting to ${hostInput}`, 'info'); }}>
           <div className="input-icon grow">
             <Link2 size={16} />
-            <input value={hostInput} onChange={(e) => setHostInput(e.target.value)} placeholder="192.168.1.14" aria-label="Device address" />
+            <input value={hostInput} onChange={(e) => setHostInput(e.target.value)} placeholder="nexus.local" aria-label="Device address" />
           </div>
           <Button type="submit">Connect</Button>
         </form>

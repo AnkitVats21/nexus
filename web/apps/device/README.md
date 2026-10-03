@@ -25,14 +25,17 @@ The player bar at the bottom controls whatever the device is playing
 
 ```bash
 npm install
-npm run dev          # http://localhost:5173, talks to a device on the LAN
+npm run dev          # http://localhost:5173, talks to a device on the LAN (defaults to nexus.local)
+# Specify a device address via NEXUS_HOST or VITE_NEXUS_HOST:
+NEXUS_HOST=nexus.local npm run dev
 ```
 
-In development the dashboard needs to know where the device is: set its
-address on the System page (it is remembered in the browser). The device answers
-with CORS headers, so the dev server can call it directly. `/api/ws` takes
-one client at a time, so a second open dashboard takes over from the
-first.
+In development the dashboard needs to know where the device is: by default it
+connects to `import.meta.env.VITE_NEXUS_HOST` (e.g. set by `NEXUS_HOST` for `npm run dev`)
+falling back to `nexus.local`. You can also set its address on the System page
+(it is remembered in the browser). The device answers with CORS headers, so the dev server
+can call it directly. `/api/ws` takes one client at a time, so a second open dashboard
+takes over from the first.
 
 ## Putting it on the device
 
