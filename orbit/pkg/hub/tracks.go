@@ -43,11 +43,24 @@ type TrackSource interface {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// MCP: nexus-mcp's device-only music tools, as the board uses them.
+// Tools: nexus-mcp's device-only music tools, as the board uses them, called
+// on the remote server (MCPTracks) or in-process (LocalTracks).
 
-type MCPTracks struct{ C *MCPClient }
+type MCPTracks struct {
+	C Tools
+	// Label names the source in logs (default "mcp").
+	Label string
+}
 
-func (s MCPTracks) Name() string { return "mcp" }
+// LocalTracks looks songs up with the in-process music tools.
+func LocalTracks(t Tools) MCPTracks { return MCPTracks{C: t, Label: "local"} }
+
+func (s MCPTracks) Name() string {
+	if s.Label != "" {
+		return s.Label
+	}
+	return "mcp"
+}
 
 type mcpTrackResult struct {
 	Track
