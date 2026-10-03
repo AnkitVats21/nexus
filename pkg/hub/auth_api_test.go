@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1371,4 +1372,139 @@ func TestLegacyTokensFlag(t *testing.T) {
 		t.Fatalf("expected rejected bad token on h2 with legacy disabled, got %+v", msg2)
 	}
 	conn2.Close(websocket.StatusNormalClosure, "")
+}
+
+func TestConcurrentPairingClaims(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	h, srv, cleanup := newAuthTestHub(t)
+	defer cleanup()
+
+	// 1. Setup admin
+	setupCode := h.Auth().SetupCode()
+	res, _ := doJSON(t, srv, http.MethodPost, "/hub/api/setup", map[string]string{
+		"setup_code":   setupCode,
+		"username":     "admin",
+		"display_name": "Admin",
+		"password":     "AdminSecret123!",
+	}, nil)
+	adminCookie := findCookie(res.Cookies(), auth.SessionCookieName)
+
+	// Admin requests a pairing code
+	res, body := doJSON(t, srv, http.MethodPost, "/hub/api/pairing", nil, adminCookie)
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("pairing code creation failed: %d %s", res.StatusCode, string(body))
+	}
+	var pData map[string]any
+	_ = json.Unmarshal(body, &pData)
+	pairCode := pData["code"].(string)
+
+	wsBase := "ws" + strings.TrimPrefix(srv.URL, "http") + EdgePath
+
+	conn1, _, err := websocket.Dial(ctx, wsBase, nil)
+	if err != nil {
+		t.Fatalf("dial conn1: %v", err)
+	}
+	defer conn1.Close(websocket.StatusNormalClosure, "")
+
+	conn2, _, err := websocket.Dial(ctx, wsBase, nil)
+	if err != nil {
+		t.Fatalf("dial conn2: %v", err)
+	}
+	defer conn2.Close(websocket.StatusNormalClosure, "")
+
+	readMsg := func(c *websocket.Conn) (map[string]any, error) {
+		_, data, err := c.Read(ctx)
+		if err != nil {
+			return nil, err
+		}
+		var m map[string]any
+		err = json.Unmarshal(data, &m)
+		return m, err
+	}
+
+	writeMsg := func(c *websocket.Conn, v any) error {
+		data, err := json.Marshal(v)
+		if err != nil {
+			return err
+		}
+		return c.Write(ctx, websocket.MessageText, data)
+	}
+
+	type claimResult struct {
+		connID   string
+		firstMsg map[string]any
+		err      error
+	}
+	results := make(chan claimResult, 2)
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	startGate := make(chan struct{})
+
+	go func() {
+		defer wg.Done()
+		<-startGate
+		err := writeMsg(conn1, map[string]any{
+			"type":      "hello",
+			"proto":     3,
+			"id":        "dev-conc-1",
+			"name":      "Device One",
+			"kind":      "esp32-s3",
+			"pair_code": pairCode,
+		})
+		if err != nil {
+			results <- claimResult{connID: "1", err: err}
+			return
+		}
+		msg, err := readMsg(conn1)
+		results <- claimResult{connID: "1", firstMsg: msg, err: err}
+	}()
+
+	go func() {
+		defer wg.Done()
+		<-startGate
+		err := writeMsg(conn2, map[string]any{
+			"type":      "hello",
+			"proto":     3,
+			"id":        "dev-conc-2",
+			"name":      "Device Two",
+			"kind":      "esp32-s3",
+			"pair_code": pairCode,
+		})
+		if err != nil {
+			results <- claimResult{connID: "2", err: err}
+			return
+		}
+		msg, err := readMsg(conn2)
+		results <- claimResult{connID: "2", firstMsg: msg, err: err}
+	}()
+
+	close(startGate) // release both at the exact same moment
+	wg.Wait()
+	close(results)
+
+	var claimedCount, rejectedCount int
+	for r := range results {
+		if r.err != nil {
+			t.Fatalf("error reading from conn %s: %v", r.connID, r.err)
+		}
+		switch r.firstMsg["type"] {
+		case "claimed":
+			claimedCount++
+		case "rejected":
+			if r.firstMsg["reason"] != "bad code" {
+				t.Fatalf("conn %s rejected with unexpected reason: %+v", r.connID, r.firstMsg)
+			}
+			rejectedCount++
+		default:
+			t.Fatalf("conn %s received unexpected message type: %+v", r.connID, r.firstMsg)
+		}
+	}
+
+	if claimedCount != 1 || rejectedCount != 1 {
+		t.Fatalf("expected exactly 1 claimed and 1 rejected 'bad code', got claimed=%d rejected=%d", claimedCount, rejectedCount)
+	}
 }

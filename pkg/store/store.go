@@ -831,6 +831,76 @@ func (s *Store) DeleteExpiredPairingCodes(ctx context.Context, now int64) error 
 	return err
 }
 
+// ClaimPairingCode atomically consumes a pairing code, upserts the device,
+// and returns the owner user. If the code is missing or expired, it returns ErrNotFound.
+func (s *Store) ClaimPairingCode(ctx context.Context, codeHash [32]byte, now int64, d *Device) (*User, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	var userID int64
+	err = tx.QueryRowContext(ctx, `
+		SELECT user_id FROM pairing_codes WHERE code_hash = ? AND expires_at > ?
+	`, codeHash[:], now).Scan(&userID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("lookup pairing code: %w", err)
+	}
+
+	_, err = tx.ExecContext(ctx, `DELETE FROM pairing_codes WHERE code_hash = ?`, codeHash[:])
+	if err != nil {
+		return nil, fmt.Errorf("delete pairing code: %w", err)
+	}
+
+	var u User
+	var mustChange int
+	err = tx.QueryRowContext(ctx, `
+		SELECT id, username, display_name, role, pass_hash, must_change, created_at, updated_at
+		FROM users
+		WHERE id = ?
+	`, userID).Scan(&u.ID, &u.Username, &u.DisplayName, &u.Role, &u.PassHash, &mustChange, &u.CreatedAt, &u.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("lookup user: %w", err)
+	}
+	u.MustChange = (mustChange != 0)
+
+	d.OwnerID = userID
+	if d.CreatedAt == 0 {
+		d.CreatedAt = now
+	}
+
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO devices (id, owner_id, name, kind, token_hash, created_at, last_seen, last_fw)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			owner_id = excluded.owner_id,
+			name = excluded.name,
+			kind = excluded.kind,
+			token_hash = excluded.token_hash,
+			last_seen = excluded.last_seen,
+			last_fw = excluded.last_fw
+	`, d.ID, d.OwnerID, d.Name, d.Kind, d.TokenHash[:], d.CreatedAt, d.LastSeen, d.LastFW)
+	if err != nil {
+		return nil, fmt.Errorf("upsert device in tx: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit claim tx: %w", err)
+	}
+
+	return &u, nil
+}
+
 // GetFirstAdmin returns the first created admin user (for legacy device ownership).
 func (s *Store) GetFirstAdmin(ctx context.Context) (*User, error) {
 	s.mu.RLock()

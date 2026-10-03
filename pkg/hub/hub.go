@@ -362,22 +362,7 @@ func (h *Hub) serveEdge(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			codeHash := auth.HashPairingCode(h.pairingPepper, cleanCode)
-			pc, err := h.auth.Store().GetPairingCode(r.Context(), codeHash)
 			now := time.Now().UTC().Unix()
-			if err != nil || pc.ExpiresAt <= now {
-				h.auth.RateLimiter().RecordPairingFailure(ip)
-				h.writeNow(conn, map[string]any{"type": "rejected", "reason": "bad code"})
-				conn.Close(closeRejected, "bad code")
-				return
-			}
-
-			user, err := h.auth.Store().GetUserByID(r.Context(), pc.UserID)
-			if err != nil || user == nil {
-				h.writeNow(conn, map[string]any{"type": "rejected", "reason": "bad code"})
-				conn.Close(closeRejected, "bad code")
-				return
-			}
-
 			deviceToken := auth.GenerateDeviceToken()
 			tokHash := auth.HashDeviceToken(deviceToken)
 
@@ -387,7 +372,6 @@ func (h *Hub) serveEdge(w http.ResponseWriter, r *http.Request) {
 			}
 			dev := &store.Device{
 				ID:        hello.ID,
-				OwnerID:   user.ID,
 				Name:      devName,
 				Kind:      hello.Kind,
 				TokenHash: tokHash,
@@ -395,16 +379,21 @@ func (h *Hub) serveEdge(w http.ResponseWriter, r *http.Request) {
 				LastSeen:  now,
 				LastFW:    hello.FW,
 			}
-			if err := h.auth.Store().UpsertDevice(r.Context(), dev); err != nil {
-				h.log.Error("Failed to upsert device on pairing", "err", err)
-				conn.Close(websocket.StatusInternalError, "internal error")
+
+			user, err := h.auth.Store().ClaimPairingCode(r.Context(), codeHash, now, dev)
+			if err != nil {
+				h.auth.RateLimiter().RecordPairingFailure(ip)
+				h.writeNow(conn, map[string]any{"type": "rejected", "reason": "bad code"})
+				conn.Close(closeRejected, "bad code")
 				return
 			}
-			_ = h.auth.Store().DeletePairingCode(r.Context(), codeHash)
 
 			ownerName = user.DisplayName
 			ownerID = user.ID
 			claimed = true
+
+			// Log one Info line on a successful pairing: device id, kind, owner user id (never the code or token).
+			h.log.Info("Device paired successfully", "id", dev.ID, "kind", dev.Kind, "owner_id", user.ID)
 
 			// Send claimed before welcome
 			claimedMsg := map[string]any{

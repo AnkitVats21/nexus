@@ -451,3 +451,80 @@ func TestStorePairingCodes(t *testing.T) {
 		t.Fatalf("expected 0 pairing codes after DeletePairingCodesForUser, got %d", countAfter)
 	}
 }
+
+func TestClaimPairingCode(t *testing.T) {
+	ctx := context.Background()
+	s, cleanup := newTestStore(t)
+	defer cleanup()
+	now := time.Now().UTC().Unix()
+
+	u := &User{
+		Username:    "carol",
+		DisplayName: "Carol White",
+		PassHash:    "hash",
+		Role:        "member",
+	}
+	if err := s.CreateUser(ctx, u); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+
+	var codeHash [32]byte
+	copy(codeHash[:], []byte("claim-code-hash-123456789012345"))
+	if err := s.CreatePairingCode(ctx, &PairingCode{
+		CodeHash:  codeHash,
+		UserID:    u.ID,
+		ExpiresAt: now + 600,
+	}); err != nil {
+		t.Fatalf("CreatePairingCode: %v", err)
+	}
+
+	var tokHash [32]byte
+	copy(tokHash[:], []byte("dev-tok-hash-123456789012345678"))
+	dev := &Device{
+		ID:        "dev-carol-1",
+		Name:      "Living Room",
+		Kind:      "esp32-s3",
+		TokenHash: tokHash,
+		LastSeen:  now,
+		LastFW:    "1.0.0",
+	}
+
+	// 1. Successful atomic claim
+	owner, err := s.ClaimPairingCode(ctx, codeHash, now, dev)
+	if err != nil {
+		t.Fatalf("ClaimPairingCode failed: %v", err)
+	}
+	if owner.ID != u.ID || owner.Username != "carol" {
+		t.Fatalf("unexpected owner: %+v", owner)
+	}
+
+	// Device must now exist in store
+	gotDev, err := s.GetDeviceByID(ctx, "dev-carol-1")
+	if err != nil || gotDev.OwnerID != u.ID || gotDev.Name != "Living Room" {
+		t.Fatalf("GetDeviceByID after claim: %v, got %+v", err, gotDev)
+	}
+
+	// Pairing code must be consumed
+	if _, err := s.GetPairingCode(ctx, codeHash); err != ErrNotFound {
+		t.Fatalf("expected ErrNotFound for consumed pairing code, got %v", err)
+	}
+
+	// 2. Second claim with the same code fails with ErrNotFound
+	_, err = s.ClaimPairingCode(ctx, codeHash, now, dev)
+	if err != ErrNotFound {
+		t.Fatalf("expected ErrNotFound on second claim, got %v", err)
+	}
+
+	// 3. Expired code fails
+	var expCodeHash [32]byte
+	copy(expCodeHash[:], []byte("exp-code-hash-123456789012345678"))
+	_ = s.CreatePairingCode(ctx, &PairingCode{
+		CodeHash:  expCodeHash,
+		UserID:    u.ID,
+		ExpiresAt: now - 10,
+	})
+	_, err = s.ClaimPairingCode(ctx, expCodeHash, now, dev)
+	if err != ErrNotFound {
+		t.Fatalf("expected ErrNotFound for expired code, got %v", err)
+	}
+}
