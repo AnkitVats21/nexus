@@ -45,8 +45,19 @@ same endpoint, kept for proto 1 boards). The hub advertises
 
 | Channel | Direction | Payload |
 |---|---|---|
-| 1 | edge to hub | mic, 16 kHz mono 16-bit little-endian PCM |
+| 1 | edge to hub | mic, 16 kHz mono 16-bit little-endian PCM or length-prefixed Opus packets (flag bit 1) |
 | 2 | hub to edge | voice reply, 24 kHz mono 16-bit little-endian PCM, 60 ms per frame |
+
+**Channel 1 binary framing (edge to hub):**
+- Byte 0: channel (`1` = mic).
+- Byte 1: flags:
+  - Bit 0 (`0x01`): reserved / keeps current meaning.
+  - Bit 1 (`0x02`): uplink audio format:
+    - Clear (`0`): raw 16 kHz mono 16-bit little-endian PCM payload (legacy/proto 1 default).
+    - Set (`1`): length-prefixed Opus packets (16 kHz mono, `RESTRICTED_LOWDELAY` / CELT supported).
+- When bit 1 is set, the frame payload contains one or more Opus packets. Each packet is preceded by a 2-byte little-endian length: `[uint16_le len][opus packet bytes]...`.
+- An edge may dynamically alternate between Opus and PCM frames within the same session without reconnecting.
+- Malformed frames (e.g. truncated length header or packet length exceeding frame) are dropped without terminating the session.
 
 - **Liveness:** WebSocket ping every 5 s from both sides; no pong for 10 s,
   or a closed socket, means the link is down. These are protocol pings, not
@@ -64,7 +75,7 @@ Edge, first frame:
 {"type": "hello", "proto": 2, "id": "nexus-3c84", "name": "Kitchen",
  "kind": "esp32-s3", "fw": "1.3.0", "token": "...",
  "roles": {
-   "voice": {"up": ["pcm16"], "down": ["pcm24"]},
+   "voice": {"up": ["opus16", "pcm16"], "down": ["pcm24"]},
    "player": {"url": true, "resolves": false, "queue_copy": true},
    "controller": true,
    "state": {"http_port": 80}
@@ -74,6 +85,8 @@ Edge, first frame:
 - `id`: stable per device. `name`: what people call it ("play it in the
   kitchen").
 - `kind`: `esp32-s3`, `orbit`, `android`, ... (for logs and the dashboard).
+- `roles.voice.up`: optional preference list of supported mic uplink formats,
+  e.g. `["opus16", "pcm16"]`. A missing list or proto 1 hello defaults to `["pcm16"]`.
 - `player.url`: it can play a stream URL the hub sends. `player.resolves`:
   it can also play from a video id alone (Orbit with yt-dlp).
   `player.queue_copy`: it keeps a copy of the queue and carries on without
@@ -85,12 +98,15 @@ Hub, answer:
 
 ```json
 {"type": "welcome", "hub": "nexus-hub 0.3.0", "proto": 2,
- "voice": {"up": "pcm", "down": "pcm", "down_rate": 24000},
+ "voice": {"up": "opus", "down": "pcm", "down_rate": 24000},
  "music": true}
 ```
 
 - `voice`: the formats, or `false` when the hub has no Gemini key (the edge
   uses its standalone path or has no voice).
+  `voice.up` returns `"opus"` if the edge offered `"opus16"` and the hub allows it
+  (hub `--uplink auto` or `opus`), indicating Opus uplink frames are allowed;
+  otherwise `"pcm"`.
 - `music`: the hub runs the music (player and controller roles are on). With
   `false`, an edge that has its own music keeps it.
 

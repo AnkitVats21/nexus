@@ -272,6 +272,7 @@ phase 1 is the link and the dashboard, phase 2 voice sessions:
 | `--mdns` | `true` | Advertise `_nexus-hub._tcp` |
 | `--mdns-iface` | LAN interfaces | Interfaces to advertise on, comma-separated |
 | `--gemini-key-file` | `~/.config/nexus/gemini_key` | Gemini API key (first line); missing = no voice through the hub |
+| `--uplink` | `auto` | Voice uplink format: `auto`, `pcm`, or `opus` (negotiated with edge) |
 | `--mcp-url` | `$NEXUS_MCP_URL` | MCP server for voice tools; empty = none |
 | `--mcp-token-file` | `~/.config/nexus/mcp_token` | MCP bearer token |
 | `--mcp-max-tools` | 32 | Most MCP tools offered to Gemini |
