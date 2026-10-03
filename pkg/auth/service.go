@@ -162,6 +162,9 @@ func (s *Service) Setup(ctx context.Context, setupCode, username, displayName, p
 
 	passHash, err := HashPassword(password)
 	if err != nil {
+		if errors.Is(err, ErrBusy) {
+			return nil, "", time.Time{}, ErrBusy
+		}
 		return nil, "", time.Time{}, err
 	}
 
@@ -210,13 +213,23 @@ func (s *Service) Login(ctx context.Context, username, password, userAgent, ip s
 
 	u, err := s.store.GetUserByUsername(ctx, username)
 	if err != nil {
-		_, _ = VerifyPassword(password, dummyPasswordHash)
+		_, vErr := VerifyPassword(password, dummyPasswordHash)
+		if errors.Is(vErr, ErrBusy) {
+			return nil, "", time.Time{}, ErrBusy
+		}
 		s.rateLimiter.RecordLoginFailure(username, ip)
 		return nil, "", time.Time{}, ErrInvalidCredentials
 	}
 
 	ok, err := VerifyPassword(password, u.PassHash)
-	if err != nil || !ok {
+	if err != nil {
+		if errors.Is(err, ErrBusy) {
+			return nil, "", time.Time{}, ErrBusy
+		}
+		s.rateLimiter.RecordLoginFailure(username, ip)
+		return nil, "", time.Time{}, ErrInvalidCredentials
+	}
+	if !ok {
 		s.rateLimiter.RecordLoginFailure(username, ip)
 		return nil, "", time.Time{}, ErrInvalidCredentials
 	}
@@ -273,12 +286,21 @@ func (s *Service) ChangePassword(ctx context.Context, userID int64, currentPass,
 	}
 
 	ok, err := VerifyPassword(currentPass, u.PassHash)
-	if err != nil || !ok {
+	if err != nil {
+		if errors.Is(err, ErrBusy) {
+			return ErrBusy
+		}
+		return errors.New("current password incorrect")
+	}
+	if !ok {
 		return errors.New("current password incorrect")
 	}
 
 	newHash, err := HashPassword(newPass)
 	if err != nil {
+		if errors.Is(err, ErrBusy) {
+			return ErrBusy
+		}
 		return err
 	}
 

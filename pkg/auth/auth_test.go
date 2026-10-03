@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -381,5 +382,35 @@ func TestUnknownUserDummyVerification(t *testing.T) {
 	_, _, _, err = svc.Login(context.Background(), "nonexistent-user", "password123!", "ua", "127.0.0.1")
 	if err != ErrInvalidCredentials {
 		t.Fatalf("expected ErrInvalidCredentials, got %v", err)
+	}
+}
+
+func TestArgon2SemaphoreConcurrencyLimit(t *testing.T) {
+	restoreTimeout := SetArgonTimeoutForTest(50 * time.Millisecond)
+	defer restoreTimeout()
+
+	// Fill the 2 semaphore slots
+	releaseSlots := HoldArgonSlotsForTest(2)
+
+	// Attempting a 3rd hash/verify must fail with ErrBusy
+	_, err := HashPassword("ValidPassword123!")
+	if !errors.Is(err, ErrBusy) {
+		t.Fatalf("expected ErrBusy when semaphore is full, got %v", err)
+	}
+
+	_, err = VerifyPassword("ValidPassword123!", dummyPasswordHash)
+	if !errors.Is(err, ErrBusy) {
+		t.Fatalf("expected ErrBusy when semaphore is full for verify, got %v", err)
+	}
+
+	// Release slots: subsequent calls must succeed
+	releaseSlots()
+
+	hash, err := HashPassword("ValidPassword123!")
+	if err != nil {
+		t.Fatalf("expected HashPassword to succeed after releasing slots, got %v", err)
+	}
+	if hash == "" {
+		t.Fatal("empty hash")
 	}
 }

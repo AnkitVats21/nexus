@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"golang.org/x/crypto/argon2"
 )
@@ -27,8 +28,43 @@ var (
 	ErrPasswordTooShort = errors.New("password must be at least 10 characters")
 	ErrInvalidUsername  = errors.New("username must be 2-32 characters of letters, digits, '.', '_' or '-'")
 	ErrInvalidHash      = errors.New("invalid password hash format")
+	ErrBusy             = errors.New("service busy, please try again")
 	usernameRegex       = regexp.MustCompile(`^[a-zA-Z0-9._-]{2,32}$`)
+
+	argonSem     = make(chan struct{}, 2)
+	argonTimeout = 3 * time.Second
 )
+
+func acquireArgon() (func(), error) {
+	timer := time.NewTimer(argonTimeout)
+	defer timer.Stop()
+
+	select {
+	case argonSem <- struct{}{}:
+		return func() { <-argonSem }, nil
+	case <-timer.C:
+		return nil, ErrBusy
+	}
+}
+
+// SetArgonTimeoutForTest temporarily overrides the argon semaphore timeout.
+func SetArgonTimeoutForTest(d time.Duration) func() {
+	orig := argonTimeout
+	argonTimeout = d
+	return func() { argonTimeout = orig }
+}
+
+// HoldArgonSlotsForTest occupies n argon semaphore slots until the returned func is called.
+func HoldArgonSlotsForTest(n int) func() {
+	for i := 0; i < n; i++ {
+		argonSem <- struct{}{}
+	}
+	return func() {
+		for i := 0; i < n; i++ {
+			<-argonSem
+		}
+	}
+}
 
 // ValidateUsername checks if username matches [a-z0-9._-]{2,32}.
 func ValidateUsername(username string) error {
@@ -43,6 +79,12 @@ func HashPassword(password string) (string, error) {
 	if len(password) < minPasswordLen {
 		return "", ErrPasswordTooShort
 	}
+
+	release, err := acquireArgon()
+	if err != nil {
+		return "", err
+	}
+	defer release()
 
 	salt := make([]byte, argonSaltLen)
 	if _, err := rand.Read(salt); err != nil {
@@ -114,6 +156,12 @@ func VerifyPassword(password, encodedHash string) (bool, error) {
 	if err != nil {
 		return false, ErrInvalidHash
 	}
+
+	release, err := acquireArgon()
+	if err != nil {
+		return false, err
+	}
+	defer release()
 
 	derivedKey := argon2.IDKey([]byte(password), salt, time, memory, threads, uint32(len(key)))
 

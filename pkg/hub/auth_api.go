@@ -170,6 +170,10 @@ func (h *Hub) handleSetupPost(w http.ResponseWriter, r *http.Request) {
 	ip := auth.ClientIP(r, h.cfg.TrustedProxy)
 	u, token, expiresAt, err := h.auth.Setup(r.Context(), req.SetupCode, req.Username, req.DisplayName, req.Password, r.UserAgent(), ip)
 	if err != nil {
+		if errors.Is(err, auth.ErrBusy) {
+			writeError(w, http.StatusServiceUnavailable, "service busy, please try again")
+			return
+		}
 		if err == auth.ErrTooManyAttempts {
 			writeError(w, http.StatusTooManyRequests, err.Error())
 			return
@@ -213,6 +217,10 @@ func (h *Hub) handleLoginPost(w http.ResponseWriter, r *http.Request) {
 	ip := auth.ClientIP(r, h.cfg.TrustedProxy)
 	u, token, expiresAt, err := h.auth.Login(r.Context(), req.Username, req.Password, r.UserAgent(), ip)
 	if err != nil {
+		if errors.Is(err, auth.ErrBusy) {
+			writeError(w, http.StatusServiceUnavailable, "service busy, please try again")
+			return
+		}
 		writeError(w, http.StatusUnauthorized, "invalid username or password")
 		return
 	}
@@ -291,6 +299,10 @@ func (h *Hub) handleMePasswordPost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.auth.ChangePassword(r.Context(), u.ID, req.Current, req.New, sess.IDHash); err != nil {
+		if errors.Is(err, auth.ErrBusy) {
+			writeError(w, http.StatusServiceUnavailable, "service busy, please try again")
+			return
+		}
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -366,6 +378,10 @@ func (h *Hub) handleUsersPost(w http.ResponseWriter, r *http.Request) {
 	tempPassword := auth.GenerateTempPassword()
 	passHash, err := auth.HashPassword(tempPassword)
 	if err != nil {
+		if errors.Is(err, auth.ErrBusy) {
+			writeError(w, http.StatusServiceUnavailable, "service busy, please try again")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "failed to hash password")
 		return
 	}
@@ -422,6 +438,10 @@ func (h *Hub) handleUserResetPost(w http.ResponseWriter, r *http.Request, target
 	tempPassword := auth.GenerateTempPassword()
 	passHash, err := auth.HashPassword(tempPassword)
 	if err != nil {
+		if errors.Is(err, auth.ErrBusy) {
+			writeError(w, http.StatusServiceUnavailable, "service busy, please try again")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "failed to hash password")
 		return
 	}

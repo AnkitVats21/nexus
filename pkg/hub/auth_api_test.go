@@ -552,3 +552,31 @@ func TestHubAPIBodySizeLimit(t *testing.T) {
 		t.Fatalf("expected 413 Request Entity Too Large for >16 KiB body, got %d", res.StatusCode)
 	}
 }
+
+func TestArgon2SemaphoreHTTP503(t *testing.T) {
+	_, srv, cleanup := newAuthTestHub(t)
+	defer cleanup()
+
+	restoreTimeout := auth.SetArgonTimeoutForTest(50 * time.Millisecond)
+	defer restoreTimeout()
+
+	// Fill both argon semaphore slots
+	releaseSlots := auth.HoldArgonSlotsForTest(2)
+	defer releaseSlots()
+
+	// Attempting login while busy must return 503 Service Unavailable
+	reqBody := `{"username":"admin","password":"password123!"}`
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/hub/api/login", strings.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", srv.URL)
+
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer res.Body.Close()
+
+	if res.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 Service Unavailable when argon2 is busy, got %d", res.StatusCode)
+	}
+}
