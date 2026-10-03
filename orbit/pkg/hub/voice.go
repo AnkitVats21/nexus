@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,6 +24,8 @@ import (
 
 const (
 	DefaultGeminiURL = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
+
+	uplinkFlagOpus    = 0x02
 
 	defaultVoiceLead  = 1500 * time.Millisecond
 	geminiDialTimeout = 10 * time.Second
@@ -82,6 +85,15 @@ type voiceSession struct {
 
 	micBytes int // this session's mic audio, logged at its end
 
+	opusDec      *opusDecoder
+	uplinkFormat string
+	opusAllowed  bool
+	opusWarned   bool
+	micPackets   int
+	bytesIn      int
+	decodeErrors int
+	pcmBytes     int
+
 	pendingMic  [][]byte
 	pendingSize int
 	pendingText string
@@ -114,6 +126,10 @@ func (v *voiceSession) attach(b *edge) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	v.b = b
+	if b != nil {
+		v.uplinkFormat = b.voiceUp
+		v.opusAllowed = (b.voiceUp == "opus")
+	}
 }
 
 // detach: the board's connection is gone; its session ends with it.
@@ -186,29 +202,101 @@ func (v *voiceSession) fromBoard(typ string, data []byte) {
 	}
 }
 
-// mic is a channel 1 payload: 16 kHz PCM.
-func (v *voiceSession) mic(pcm []byte) {
+// mic handles a channel 1 binary frame payload.
+// flags: byte 1 of channel 1 frame (bit 1: 0x02 = Opus, 0x00 = raw PCM).
+// payload: byte 2.. of channel 1 frame.
+func (v *voiceSession) mic(flags byte, payload []byte) {
 	t0 := time.Now()
 	v.mu.Lock()
 	if w := time.Since(t0); w > 200*time.Millisecond {
 		v.log.Warn("Mic waited for the session lock", "ms", w.Milliseconds())
 	}
 	defer v.mu.Unlock()
-	if !v.active || len(pcm) == 0 {
+	if !v.active || len(payload) == 0 {
 		return
 	}
-	v.micBytes += len(pcm)
-	if v.gc == nil || !v.gc.ready {
-		buf := append([]byte(nil), pcm...)
-		v.pendingMic = append(v.pendingMic, buf)
-		v.pendingSize += len(buf)
-		for v.pendingSize > micBufferMax && len(v.pendingMic) > 1 {
-			v.pendingSize -= len(v.pendingMic[0])
-			v.pendingMic = v.pendingMic[1:]
+	v.bytesIn += len(payload)
+
+	if flags&uplinkFlagOpus != 0 {
+		if !v.opusAllowed && !v.opusWarned {
+			v.opusWarned = true
+			v.log.Warn("Opus frame received but opus was not negotiated for edge", "id", v.id)
 		}
-		return
+		if v.opusDec == nil {
+			dec, err := newOpusDecoder(16000, 1)
+			if err != nil {
+				v.log.Error("Failed to create Opus decoder", "err", err)
+				v.decodeErrors++
+				return
+			}
+			v.opusDec = dec
+		}
+
+		pcmBuf := make([]int16, 1920)
+		var decodedPCM []byte
+		offset := 0
+		for offset < len(payload) {
+			if offset+2 > len(payload) {
+				v.log.Warn("Malformed Opus frame: truncated packet length header", "offset", offset, "len", len(payload))
+				v.decodeErrors++
+				return
+			}
+			pktLen := int(binary.LittleEndian.Uint16(payload[offset : offset+2]))
+			offset += 2
+			if offset+pktLen > len(payload) {
+				v.log.Warn("Malformed Opus frame: packet length exceeds frame", "pktLen", pktLen, "remaining", len(payload)-offset)
+				v.decodeErrors++
+				return
+			}
+			pkt := payload[offset : offset+pktLen]
+			offset += pktLen
+
+			n, err := v.opusDec.Decode(pkt, pcmBuf)
+			if err != nil {
+				v.log.Warn("Opus decode failed", "err", err)
+				v.decodeErrors++
+				continue
+			}
+			v.micPackets++
+			for i := 0; i < n; i++ {
+				s := uint16(pcmBuf[i])
+				decodedPCM = append(decodedPCM, byte(s), byte(s>>8))
+			}
+		}
+
+		if len(decodedPCM) == 0 {
+			return
+		}
+		v.pcmBytes += len(decodedPCM)
+		v.micBytes = v.pcmBytes
+		if v.gc == nil || !v.gc.ready {
+			buf := append([]byte(nil), decodedPCM...)
+			v.pendingMic = append(v.pendingMic, buf)
+			v.pendingSize += len(buf)
+			for v.pendingSize > micBufferMax && len(v.pendingMic) > 1 {
+				v.pendingSize -= len(v.pendingMic[0])
+				v.pendingMic = v.pendingMic[1:]
+			}
+			return
+		}
+		v.sendMicLocked(decodedPCM)
+	} else {
+		pcm := payload
+		v.micPackets++
+		v.pcmBytes += len(pcm)
+		v.micBytes = v.pcmBytes
+		if v.gc == nil || !v.gc.ready {
+			buf := append([]byte(nil), pcm...)
+			v.pendingMic = append(v.pendingMic, buf)
+			v.pendingSize += len(buf)
+			for v.pendingSize > micBufferMax && len(v.pendingMic) > 1 {
+				v.pendingSize -= len(v.pendingMic[0])
+				v.pendingMic = v.pendingMic[1:]
+			}
+			return
+		}
+		v.sendMicLocked(pcm)
 	}
-	v.sendMicLocked(pcm)
 }
 
 func (v *voiceSession) startSession(m sessionStartMsg) {
@@ -234,6 +322,25 @@ func (v *voiceSession) startSession(m sessionStartMsg) {
 		}
 		v.h.music.voiceActive(v.id, true)
 	}
+	if v.b != nil {
+		v.uplinkFormat = v.b.voiceUp
+		v.opusAllowed = (v.b.voiceUp == "opus")
+	}
+	if v.uplinkFormat == "" {
+		v.uplinkFormat = "pcm"
+	}
+	if v.opusDec != nil {
+		v.opusDec.Close()
+		v.opusDec = nil
+	}
+	v.opusDec, _ = newOpusDecoder(16000, 1)
+	v.micPackets = 0
+	v.bytesIn = 0
+	v.decodeErrors = 0
+	v.pcmBytes = 0
+	v.opusWarned = false
+	v.log.Info("Voice session starting", "uplink", v.uplinkFormat)
+
 	v.pendingMic, v.pendingSize = nil, 0
 	v.pendingText = m.Text
 	v.owed = m.Text != ""
@@ -257,12 +364,26 @@ func (v *voiceSession) endLocked(keep bool) {
 	wasActive := v.active
 	v.active = false
 	if wasActive {
-		v.log.Info("Voice session ended", "mic_ms", v.micBytes/32)
+		v.log.Info("Voice session ended",
+			"mic_ms", v.pcmBytes/32,
+			"packets", v.micPackets,
+			"bytes_in", v.bytesIn,
+			"decode_errors", v.decodeErrors,
+		)
 		if v.h.music != nil {
 			v.h.music.voiceActive(v.id, false)
 		}
 	}
+	if v.opusDec != nil {
+		v.opusDec.Close()
+		v.opusDec = nil
+	}
 	v.micBytes = 0
+	v.micPackets = 0
+	v.bytesIn = 0
+	v.decodeErrors = 0
+	v.pcmBytes = 0
+	v.opusWarned = false
 	v.pendingMic, v.pendingSize, v.pendingText = nil, 0, ""
 	if v.b != nil {
 		v.b.voiceQ.flush()

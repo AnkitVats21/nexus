@@ -68,6 +68,8 @@ type Config struct {
 	// endpoint (DefaultGeminiURL; tests use a fake).
 	GeminiKey string
 	GeminiURL string
+	// Voice uplink format: auto|pcm|opus (default "auto")
+	Uplink string
 	// Remote tools for voice sessions (nil = none).
 	MCP *MCPClient
 	// How far ahead of playback the reply is sent (defaultVoiceLead).
@@ -104,6 +106,7 @@ type edge struct {
 	fw      string
 	roles   edgeRoles
 	legacy  bool     // proto 1 hello (no roles): runs its own music
+	voiceUp string   // negotiated uplink: "opus" or "pcm"
 	apiBase *url.URL // state role only
 	base    string   // the hub as this edge reached it: "http://host:port"
 	proxy   *httputil.ReverseProxy
@@ -276,11 +279,13 @@ func (h *Hub) serveEdge(w http.ResponseWriter, r *http.Request) {
 		old.cancel()
 	}
 
-	// voice: PCM both ways, or false without a Gemini key (the board then
+	b.voiceUp = h.negotiateUplink(roles)
+
+	// voice: PCM or Opus, or false without a Gemini key (the board then
 	// keeps its sessions direct).
 	var voice any = false
 	if h.voiceEnabled() {
-		voice = map[string]any{"up": "pcm", "down": "pcm", "down_rate": voiceRate}
+		voice = map[string]any{"up": b.voiceUp, "down": "pcm", "down_rate": voiceRate}
 	}
 	proto := min(ProtocolVersion, max(hello.Proto, 1))
 	welcome, _ := json.Marshal(map[string]any{"type": "welcome", "hub": "nexus-hub " + h.cfg.Version,
@@ -289,7 +294,7 @@ func (h *Hub) serveEdge(w http.ResponseWriter, r *http.Request) {
 		h.dropBoard(b, err)
 		return
 	}
-	h.log.Info("Edge connected", "id", b.id, "name", b.name, "kind", b.kind, "fw", b.fw, "roles", b.roles.String())
+	h.log.Info("Edge connected", "id", b.id, "name", b.name, "kind", b.kind, "fw", b.fw, "roles", b.roles.String(), "uplink", b.voiceUp)
 
 	b.voice.attach(b)
 	if h.music != nil {
@@ -308,12 +313,43 @@ func (h *Hub) serveEdge(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case typ == websocket.MessageText:
 			h.fromBoard(b, data)
-		case len(data) > 2 && data[0] == chanMic:
-			b.voice.mic(data[2:])
+		case len(data) >= 2 && data[0] == chanMic:
+			b.voice.mic(data[1], data[2:])
 		}
 		if d := time.Since(t0); d > 300*time.Millisecond {
 			h.log.Warn("Board message took long to handle", "ms", d.Milliseconds(), "binary", typ == websocket.MessageBinary)
 		}
+	}
+}
+
+func (h *Hub) negotiateUplink(roles *edgeRoles) string {
+	var offers []string
+	if roles != nil && roles.Voice != nil && len(roles.Voice.Up) > 0 {
+		offers = roles.Voice.Up
+	} else {
+		offers = []string{"pcm16"}
+	}
+	hasOpus16 := false
+	for _, o := range offers {
+		if strings.EqualFold(strings.TrimSpace(o), "opus16") {
+			hasOpus16 = true
+			break
+		}
+	}
+	mode := strings.ToLower(strings.TrimSpace(h.cfg.Uplink))
+	switch mode {
+	case "pcm":
+		return "pcm"
+	case "opus", "auto", "":
+		if hasOpus16 {
+			return "opus"
+		}
+		return "pcm"
+	default:
+		if hasOpus16 {
+			return "opus"
+		}
+		return "pcm"
 	}
 }
 
