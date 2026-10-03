@@ -1,7 +1,7 @@
 # Nexus hub protocol
 
-Status: proto 1 (built: link, state, voice), proto 2 (draft: roles, music)
-Last updated: 2026-10-02
+Status: proto 1 (built: link, state, voice), proto 2 (built: roles, music), proto 3 (built: pairing, device tokens)
+Last updated: 2026-10-03
 
 This is the contract between `nexus-hub` and the devices that connect to it.
 A new client (Android, Windows, another board) is written from this document.
@@ -67,13 +67,14 @@ same endpoint, kept for proto 1 boards). The hub advertises
 - **One connection per id:** a second connection with the same `id` replaces
   the first.
 
-### 3.1 hello and welcome
+### 3.1 hello, claimed, and welcome
 
-Edge, first frame:
+#### Edge hello frame:
 
+**1. Paired edge (Protocol 3):**
 ```json
-{"type": "hello", "proto": 2, "id": "nexus-3c84", "name": "Kitchen",
- "kind": "esp32-s3", "fw": "1.3.0", "token": "...",
+{"type": "hello", "proto": 3, "id": "nexus-3c84", "name": "Kitchen",
+ "kind": "esp32-s3", "fw": "1.3.0", "token": "<device-token>",
  "roles": {
    "voice": {"up": ["opus16", "pcm16"], "down": ["pcm24"]},
    "player": {"url": true, "resolves": false, "queue_copy": true},
@@ -82,35 +83,66 @@ Edge, first frame:
  }}
 ```
 
-- `id`: stable per device. `name`: what people call it ("play it in the
-  kitchen").
-- `kind`: `esp32-s3`, `orbit`, `android`, ... (for logs and the dashboard).
-- `roles.voice.up`: optional preference list of supported mic uplink formats,
-  e.g. `["opus16", "pcm16"]`. A missing list or proto 1 hello defaults to `["pcm16"]`.
-- `player.url`: it can play a stream URL the hub sends. `player.resolves`:
-  it can also play from a video id alone (Orbit with yt-dlp).
-  `player.queue_copy`: it keeps a copy of the queue and carries on without
-  the hub (section 5.4).
-- A proto 1 hello has no `roles`. The hub treats it as the ESP board:
-  `voice`, `state` (with `http_port` from the hello) and nothing else.
-
-Hub, answer:
-
+**2. First-time edge pairing (Protocol 3):**
 ```json
-{"type": "welcome", "hub": "nexus-hub 0.3.0", "proto": 2,
- "voice": {"up": "opus", "down": "pcm", "down_rate": 24000},
- "music": true}
+{"type": "hello", "proto": 3, "id": "nexus-3c84", "name": "Kitchen",
+ "kind": "esp32-s3", "fw": "1.3.0", "pair_code": "482-913",
+ "roles": {
+   "voice": {"up": ["opus16", "pcm16"], "down": ["pcm24"]},
+   "player": {"url": true, "resolves": false, "queue_copy": true},
+   "controller": true,
+   "state": {"http_port": 80}
+ }}
 ```
 
-- `voice`: the formats, or `false` when the hub has no Gemini key (the edge
-  uses its standalone path or has no voice).
-  `voice.up` returns `"opus"` if the edge offered `"opus16"` and the hub allows it
-  (hub `--uplink auto` or `opus`), indicating Opus uplink frames are allowed;
-  otherwise `"pcm"`.
-- `music`: the hub runs the music (player and controller roles are on). With
-  `false`, an edge that has its own music keeps it.
+- `id`: stable per device. `name`: what people call it ("play it in the kitchen").
+- `kind`: `esp32-s3`, `orbit`, `android`, ... (for logs and the dashboard).
+- `token`: 32-byte base64url device token, bound to the device's `id`. The hub stores only its SHA-256 hash.
+- `pair_code`: 6-digit code obtained from `POST /hub/api/pairing` (dash optional). The hub checks code hash with salt pepper and rate limiting.
+- `roles.voice.up`: optional preference list of supported mic uplink formats, e.g. `["opus16", "pcm16"]`. Missing list defaults to `["pcm16"]`.
+- `player.url`: it can play a stream URL the hub sends. `player.resolves`: it can play from video ID. `player.queue_copy`: keeps queue copy without hub.
+- A proto 1 hello has no `roles`. The hub treats it as the ESP board: `voice`, `state` (with `http_port` from hello) and nothing else.
 
-`{"type": "rejected", "reason": "bad token"}` and the socket closes.
+#### Hub handshake responses:
+
+**1. Claimed frame (sent on pair_code before welcome):**
+```json
+{"type": "claimed", "token": "...", "owner": "Alice"}
+```
+The edge must save this token persistently in non-volatile storage (NVS) for subsequent reconnections.
+
+**2. Welcome frame:**
+```json
+{"type": "welcome", "hub": "nexus-hub 0.3.0", "proto": 3,
+ "voice": {"up": "opus", "down": "pcm", "down_rate": 24000},
+ "music": true,
+ "claimed": true,
+ "owner": "Alice"}
+```
+- `voice`: audio format negotiation result (`opus` or `pcm`), or `false` when voice is disabled.
+- `music`: true when music subsystem is enabled on the hub.
+- `claimed`: true if the device is claimed by an owner.
+- `owner`: display name of the device owner.
+
+**3. Legacy edges (`--legacy-tokens`):**
+Proto 2 edges connecting with shared tokens from `--token-file` receive a welcome response with `"legacy": true` and are assigned to the first admin.
+```json
+{"type": "welcome", "hub": "nexus-hub 0.3.0", "proto": 2,
+ "voice": ...,
+ "music": true,
+ "legacy": true,
+ "owner": "Admin"}
+```
+If `--legacy-tokens=false` is set on the hub, legacy edges sending shared tokens are rejected.
+
+**4. Rejected frame:**
+```json
+{"type": "rejected", "reason": "bad token"}
+```
+The WebSocket closes with status code `4001`. Generic rejection reasons:
+- `"bad token"`: device token is invalid, unrecognized, or bound to a different device ID.
+- `"bad code"`: pairing code is invalid, expired, already used, or rate limit exceeded.
+- `"pairing required"`: neither token nor pair code provided on edge hello.
 
 ## 4. Voice
 
@@ -272,9 +304,18 @@ All JSON, under `/hub/api/`. Unauthenticated requests to protected endpoints ret
 | `POST /hub/api/users` | Admin only | `{username, display_name, role}` → Creates user with temporary password and `must_change: true`. |
 | `POST /hub/api/users/{id}/reset` | Admin only | Generates new temporary password, updates `must_change: true`, revokes user's sessions. |
 | `DELETE /hub/api/users/{id}` | Admin only | Deletes user (cannot delete self or last admin). |
+| `POST /hub/api/pairing` | Authenticated | Issues a 6-digit pairing code with 10-minute expiry (max 3 live codes per user). Returns `{code: "482-913", expires_at}`. |
+| `GET /hub/api/pairing` | Authenticated | Returns active pairing codes for current user: `[{code, expires_at}]`. |
+| `DELETE /hub/api/pairing/{code}` | Authenticated | Cancels a specific pairing code. |
+| `GET /hub/api/devices` | Authenticated | Returns user's devices (or all devices if admin), with fields `{id, name, kind, online, fw, roles, uplink, last_seen, connected_s, owner, legacy}`. |
+| `PATCH /hub/api/devices/{id}` | Owner or Admin | `{name}` → Renames device. |
+| `DELETE /hub/api/devices/{id}` | Owner or Admin | Removes device from DB and disconnects any connected edge with that ID. |
 
-### 8.3 Existing Routes Auth Policy
+### 8.3 Board API Proxies
+- `/hub/d/{id}/api/*`: Reverse proxy to edge device's HTTP server. Restricted to device owner (or admin). Enforces session authentication, `must_change` check, and CSRF Origin check on state-changing methods.
+- `/api/ws` and `/api/*`: Legacy board API proxy and browser WebSocket. Restricted to the owner of `h.board` (or admin).
+
+### 8.4 Other Routes Auth Policy
 - `/hub/status`: Admin only (`401` if unauthenticated, `403` if not admin).
-- `/api/ws` and `/api/*`: Authenticated user session required.
 - `/hub/cache/*`: Open on LAN for edge audio streaming.
 
