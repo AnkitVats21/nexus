@@ -93,6 +93,8 @@ type Config struct {
 	TrustedProxy string
 	// Public URL of the hub for CSRF and external links (flag --public-url).
 	PublicURL string
+	// Allowed origins for browser WebSocket connections (flag --allow-origin).
+	AllowedOrigins []string
 	// Test-only: bypass database and authentication subsystem.
 	NoAuth bool
 }
@@ -509,6 +511,24 @@ func (h *Hub) dropBoard(b *edge, err error) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func (h *Hub) serveBrowser(w http.ResponseWriter, r *http.Request) {
+	origin := r.Header.Get("Origin")
+	_, cookieErr := r.Cookie(auth.SessionCookieName)
+	hasCookie := (cookieErr == nil)
+
+	// Missing Origin is allowed only for non-browser clients without a cookie.
+	// A request carrying the session cookie must have a matching Origin.
+	if origin == "" {
+		if hasCookie {
+			http.Error(w, `{"error":"forbidden: missing origin with session cookie"}`, http.StatusForbidden)
+			return
+		}
+	} else {
+		if !auth.MatchOrigin(origin, r.Host, h.cfg.PublicURL, h.cfg.AllowedOrigins) {
+			http.Error(w, `{"error":"forbidden: origin not allowed"}`, http.StatusForbidden)
+			return
+		}
+	}
+
 	if h.auth != nil {
 		u, _, err := h.authenticate(r)
 		if err != nil || u == nil {
@@ -516,7 +536,6 @@ func (h *Hub) serveBrowser(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	// Same rule as the board's own /api/ws: any origin (dev builds run elsewhere).
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
 	if err != nil {
 		return

@@ -341,7 +341,10 @@ func TestAuthMiddlewareOnExistingRoutes(t *testing.T) {
 
 	// Authenticated dial: passes auth check (fails with closeBoardOffline because no board connected)
 	opts := &websocket.DialOptions{
-		HTTPHeader: http.Header{"Cookie": []string{memberCookie.String()}},
+		HTTPHeader: http.Header{
+			"Cookie": []string{memberCookie.String()},
+			"Origin": []string{srv.URL},
+		},
 	}
 	conn, _, err := websocket.Dial(ctx, wsBase+"/api/ws", opts)
 	if err != nil {
@@ -415,4 +418,116 @@ func TestFailClosedNoAuthWithoutFlag(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error when auth is not configured, got nil")
 	}
+}
+
+func TestBrowserWSOriginValidation(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	dir, err := os.MkdirTemp("", "nexus-ws-origin-*")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	defer os.RemoveAll(dir)
+
+	dbPath := filepath.Join(dir, "hub.db")
+	h, err := New(Config{
+		Version:        "test",
+		Tokens:         []string{testToken},
+		DBPath:         dbPath,
+		TrustedProxy:   "127.0.0.1",
+		PublicURL:      "http://hub.local:8380",
+		AllowedOrigins: []string{"http://localhost:5173", "http://dev.local:3000"},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	srv := httptest.NewServer(h.Handler())
+	defer srv.Close()
+
+	// 1. Initial setup to get a valid session cookie
+	setupBody := `{"setup_code":"` + h.auth.SetupCode() + `","username":"admin","display_name":"Admin","password":"admin-password123"}`
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/hub/api/setup", strings.NewReader(setupBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", srv.URL)
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	var sessCookie *http.Cookie
+	for _, c := range res.Cookies() {
+		if c.Name == auth.SessionCookieName {
+			sessCookie = c
+			break
+		}
+	}
+	if sessCookie == nil {
+		t.Fatal("expected session cookie from setup")
+	}
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/api/ws"
+
+	// 2. Request with session cookie but MISSING Origin: rejected (403)
+	optsMissingOrigin := &websocket.DialOptions{
+		HTTPHeader: http.Header{
+			"Cookie": []string{sessCookie.String()},
+		},
+	}
+	_, _, err = websocket.Dial(ctx, wsURL, optsMissingOrigin)
+	if err == nil {
+		t.Fatal("expected error when connecting with session cookie and missing Origin")
+	}
+
+	// 3. Request with session cookie and WRONG Origin: rejected (403)
+	optsWrongOrigin := &websocket.DialOptions{
+		HTTPHeader: http.Header{
+			"Cookie": []string{sessCookie.String()},
+			"Origin": []string{"http://attacker.com"},
+		},
+	}
+	_, _, err = websocket.Dial(ctx, wsURL, optsWrongOrigin)
+	if err == nil {
+		t.Fatal("expected error when connecting with wrong Origin")
+	}
+
+	// 4. Request with session cookie and matching Host Origin: accepted
+	optsValidHostOrigin := &websocket.DialOptions{
+		HTTPHeader: http.Header{
+			"Cookie": []string{sessCookie.String()},
+			"Origin": []string{srv.URL},
+		},
+	}
+	conn, _, err := websocket.Dial(ctx, wsURL, optsValidHostOrigin)
+	if err != nil {
+		t.Fatalf("expected valid Host Origin to connect, got %v", err)
+	}
+	conn.Close(websocket.StatusNormalClosure, "")
+
+	// 5. Request with session cookie and matching --allow-origin: accepted
+	optsAllowedOrigin := &websocket.DialOptions{
+		HTTPHeader: http.Header{
+			"Cookie": []string{sessCookie.String()},
+			"Origin": []string{"http://localhost:5173"},
+		},
+	}
+	conn, _, err = websocket.Dial(ctx, wsURL, optsAllowedOrigin)
+	if err != nil {
+		t.Fatalf("expected --allow-origin to connect, got %v", err)
+	}
+	conn.Close(websocket.StatusNormalClosure, "")
+
+	// 6. Non-browser client without cookie and without Origin on test hub with NoAuth: accepted
+	hNoAuth, err := New(Config{Version: "test", Tokens: []string{testToken}, NoAuth: true})
+	if err != nil {
+		t.Fatalf("New NoAuth: %v", err)
+	}
+	srvNoAuth := httptest.NewServer(hNoAuth.Handler())
+	defer srvNoAuth.Close()
+
+	wsURLNoAuth := "ws" + strings.TrimPrefix(srvNoAuth.URL, "http") + "/api/ws"
+	conn, _, err = websocket.Dial(ctx, wsURLNoAuth, nil) // no cookie, no origin
+	if err != nil {
+		t.Fatalf("expected non-browser client without cookie and origin to connect to NoAuth hub, got %v", err)
+	}
+	conn.Close(websocket.StatusNormalClosure, "")
 }

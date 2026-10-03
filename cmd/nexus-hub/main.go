@@ -24,6 +24,17 @@ import (
 
 const version = "0.1.0"
 
+type stringSlice []string
+
+func (s *stringSlice) String() string {
+	return strings.Join(*s, ",")
+}
+
+func (s *stringSlice) Set(val string) error {
+	*s = append(*s, val)
+	return nil
+}
+
 func main() {
 	home, _ := os.UserHomeDir()
 	listen := flag.String("listen", ":8380", "address to listen on")
@@ -50,6 +61,8 @@ func main() {
 	dbPath := flag.String("db", filepath.Join(home, ".local", "share", "nexus", "nexus.db"), "SQLite database path")
 	trustedProxy := flag.String("trusted-proxy", "", "trusted reverse proxy IP for HTTPS headers")
 	publicURL := flag.String("public-url", "", "public URL of the hub for CSRF and external links")
+	var allowOrigins stringSlice
+	flag.Var(&allowOrigins, "allow-origin", "repeatable allowed Origin for browser WebSocket connections (e.g. http://localhost:5173)")
 	debug := flag.Bool("debug", false, "debug logging")
 	flag.Parse()
 
@@ -153,7 +166,7 @@ func main() {
 	}
 	h, err := hub.New(hub.Config{Version: version, Tokens: tokens, WebDir: *webDir, Log: log,
 		GeminiKey: geminiKey, Uplink: *uplink, MCP: mcp, Tracks: tracks, Cache: cache,
-		DBPath: *dbPath, TrustedProxy: *trustedProxy, PublicURL: *publicURL})
+		DBPath: *dbPath, TrustedProxy: *trustedProxy, PublicURL: *publicURL, AllowedOrigins: allowOrigins})
 	if err != nil {
 		log.Error("Failed to initialize hub", "err", err)
 		os.Exit(1)
