@@ -1,0 +1,289 @@
+package auth
+
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"nexus/pkg/store"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+func newTestStoreAndAuth(t *testing.T) (*store.Store, *Service, func()) {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "nexus-auth-test-*")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	dbPath := filepath.Join(dir, "test.db")
+	st, err := store.Open(dbPath)
+	if err != nil {
+		os.RemoveAll(dir)
+		t.Fatalf("Open store: %v", err)
+	}
+	svc, err := NewService(st, "127.0.0.1", "http://hub.local:8380")
+	if err != nil {
+		st.Close()
+		os.RemoveAll(dir)
+		t.Fatalf("NewService: %v", err)
+	}
+	cleanup := func() {
+		st.Close()
+		os.RemoveAll(dir)
+	}
+	return st, svc, cleanup
+}
+
+func TestPasswordHashingAndVerification(t *testing.T) {
+	// Password too short
+	if _, err := HashPassword("short"); err != ErrPasswordTooShort {
+		t.Fatalf("expected ErrPasswordTooShort, got %v", err)
+	}
+
+	rawPass := "CorrectHorseBatteryStaple123!"
+	encoded, err := HashPassword(rawPass)
+	if err != nil {
+		t.Fatalf("HashPassword: %v", err)
+	}
+
+	if !strings.HasPrefix(encoded, "$argon2id$v=19$m=65536,t=3,p=2$") {
+		t.Fatalf("unexpected hash header: %s", encoded)
+	}
+
+	// Verify valid password
+	ok, err := VerifyPassword(rawPass, encoded)
+	if err != nil || !ok {
+		t.Fatalf("expected valid verification, got ok=%v, err=%v", ok, err)
+	}
+
+	// Verify wrong password
+	ok, err = VerifyPassword("WrongPassword123!", encoded)
+	if err != nil || ok {
+		t.Fatalf("expected false for wrong password, got ok=%v, err=%v", ok, err)
+	}
+}
+
+func TestUsernameValidation(t *testing.T) {
+	valid := []string{"admin", "riya", "john.doe", "user-name_1", "ab", "12345678901234567890123456789012"}
+	for _, u := range valid {
+		if err := ValidateUsername(u); err != nil {
+			t.Errorf("expected valid username %q, got err=%v", u, err)
+		}
+	}
+
+	invalid := []string{"a", "has space", "admin@domain", "user#1", "", strings.Repeat("a", 33)}
+	for _, u := range invalid {
+		if err := ValidateUsername(u); err == nil {
+			t.Errorf("expected invalid username %q, got nil error", u)
+		}
+	}
+}
+
+func TestSetupFlowAndRateLimits(t *testing.T) {
+	_, svc, cleanup := newTestStoreAndAuth(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	needed, err := svc.SetupNeeded(ctx)
+	if err != nil || !needed {
+		t.Fatalf("expected setup needed, got needed=%v, err=%v", needed, err)
+	}
+
+	code := svc.SetupCode()
+	if code == "" {
+		t.Fatal("expected non-empty setup code")
+	}
+
+	// Test wrong setup code failure
+	_, _, _, err = svc.Setup(ctx, "999-999", "admin", "Admin", "SecretPass123!", "Agent", "127.0.0.1")
+	if err != ErrInvalidSetupCode {
+		t.Fatalf("expected ErrInvalidSetupCode, got %v", err)
+	}
+
+	// Rate limit setup code (10 failures)
+	for i := 0; i < 9; i++ {
+		_, _, _, _ = svc.Setup(ctx, "999-999", "admin", "Admin", "SecretPass123!", "Agent", "127.0.0.1")
+	}
+	_, _, _, err = svc.Setup(ctx, code, "admin", "Admin", "SecretPass123!", "Agent", "127.0.0.1")
+	if err != ErrTooManyAttempts {
+		t.Fatalf("expected ErrTooManyAttempts after 10 failed codes, got %v", err)
+	}
+
+	// Different IP should still be allowed
+	u, token, _, err := svc.Setup(ctx, code, "admin", "Admin", "SecretPass123!", "Agent", "10.0.0.2")
+	if err != nil {
+		t.Fatalf("Setup from different IP failed: %v", err)
+	}
+	if u.Role != "admin" || token == "" {
+		t.Fatalf("unexpected setup result: user=%+v, token=%s", u, token)
+	}
+
+	// Once setup, code is cleared and setup is no longer needed
+	if svc.SetupCode() != "" {
+		t.Fatalf("expected setup code cleared, got %s", svc.SetupCode())
+	}
+	needed, _ = svc.SetupNeeded(ctx)
+	if needed {
+		t.Fatal("expected setup not needed after admin creation")
+	}
+
+	// Re-attempting setup fails
+	_, _, _, err = svc.Setup(ctx, code, "admin2", "Admin2", "SecretPass123!", "Agent", "10.0.0.2")
+	if err != ErrSetupNotNeeded {
+		t.Fatalf("expected ErrSetupNotNeeded, got %v", err)
+	}
+}
+
+func TestLoginAndSessions(t *testing.T) {
+	_, svc, cleanup := newTestStoreAndAuth(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	code := svc.SetupCode()
+	_, _, _, err := svc.Setup(ctx, code, "admin", "Admin", "AdminSecret123!", "Mozilla", "127.0.0.1")
+	if err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	// Successful login
+	u, token, _, err := svc.Login(ctx, "admin", "AdminSecret123!", "Firefox", "127.0.0.1")
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	if u.Username != "admin" {
+		t.Fatalf("unexpected user: %+v", u)
+	}
+
+	// Authenticate session
+	hash := TokenHash(token)
+	authU, sess, err := svc.AuthenticateSession(ctx, hash)
+	if err != nil {
+		t.Fatalf("AuthenticateSession: %v", err)
+	}
+	if authU.ID != u.ID || sess.UserAgent != "Firefox" {
+		t.Fatalf("unexpected authenticated session: user=%+v, sess=%+v", authU, sess)
+	}
+
+	// Change password and ensure other sessions are revoked
+	_, hash2, _ := GenerateSessionToken()
+	now := time.Now().Unix()
+	_ = svc.Store().CreateSession(ctx, &store.Session{
+		IDHash:    hash2,
+		UserID:    u.ID,
+		CreatedAt: now,
+		ExpiresAt: now + 3600,
+	})
+
+	if err := svc.ChangePassword(ctx, u.ID, "AdminSecret123!", "NewSecretPass456!", hash); err != nil {
+		t.Fatalf("ChangePassword: %v", err)
+	}
+
+	// Token 1 should remain valid
+	if _, _, err := svc.AuthenticateSession(ctx, hash); err != nil {
+		t.Fatalf("expected current session to remain valid, got %v", err)
+	}
+
+	// Token 2 should be revoked
+	if _, _, err := svc.AuthenticateSession(ctx, hash2); err != ErrUnauthorized {
+		t.Fatalf("expected other session to be revoked, got %v", err)
+	}
+
+	// Logout token 1
+	if err := svc.Logout(ctx, hash); err != nil {
+		t.Fatalf("Logout: %v", err)
+	}
+	if _, _, err := svc.AuthenticateSession(ctx, hash); err != ErrUnauthorized {
+		t.Fatalf("expected logged out session to be unauthorized, got %v", err)
+	}
+}
+
+func TestLoginRateLimit(t *testing.T) {
+	_, svc, cleanup := newTestStoreAndAuth(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	code := svc.SetupCode()
+	_, _, _, _ = svc.Setup(ctx, code, "bob", "Bob", "SecretPass123!", "Mozilla", "127.0.0.1")
+
+	// 5 failed login attempts
+	for i := 0; i < 5; i++ {
+		_, _, _, err := svc.Login(ctx, "bob", "WrongPass123!", "Mozilla", "127.0.0.1")
+		if err != ErrInvalidCredentials {
+			t.Fatalf("attempt %d: expected ErrInvalidCredentials, got %v", i, err)
+		}
+	}
+
+	// 6th attempt with correct password should be locked out
+	_, _, _, err := svc.Login(ctx, "bob", "SecretPass123!", "Mozilla", "127.0.0.1")
+	if err != ErrInvalidCredentials {
+		t.Fatalf("expected lockout (generic invalid credentials), got %v", err)
+	}
+
+	// Different IP still locked because username is locked
+	_, _, _, err = svc.Login(ctx, "bob", "SecretPass123!", "Mozilla", "192.168.1.100")
+	if err != ErrInvalidCredentials {
+		t.Fatalf("expected username lockout across IPs, got %v", err)
+	}
+}
+
+func TestCSRFValidation(t *testing.T) {
+	// GET request: no CSRF check needed
+	req := httptest.NewRequest(http.MethodGet, "/hub/api/me", nil)
+	if err := ValidateCSRF(req, ""); err != nil {
+		t.Fatalf("expected GET to pass CSRF, got %v", err)
+	}
+
+	// POST without application/json: rejected
+	req = httptest.NewRequest(http.MethodPost, "/hub/api/login", strings.NewReader(`{}`))
+	req.Header.Set("Origin", "http://hub.local:8380")
+	if err := ValidateCSRF(req, ""); err != ErrCSRFContentType {
+		t.Fatalf("expected ErrCSRFContentType, got %v", err)
+	}
+
+	// POST with application/json but missing Origin and Referer: rejected
+	req = httptest.NewRequest(http.MethodPost, "/hub/api/login", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	if err := ValidateCSRF(req, ""); err != ErrCSRFMissingOrigin {
+		t.Fatalf("expected ErrCSRFMissingOrigin, got %v", err)
+	}
+
+	// POST with foreign Origin: rejected
+	req = httptest.NewRequest(http.MethodPost, "/hub/api/login", strings.NewReader(`{}`))
+	req.Host = "hub.local:8380"
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "https://evil.attacker.com")
+	if err := ValidateCSRF(req, ""); err != ErrCSRFOriginMismatch {
+		t.Fatalf("expected ErrCSRFOriginMismatch, got %v", err)
+	}
+
+	// POST with matching Origin: accepted
+	req = httptest.NewRequest(http.MethodPost, "/hub/api/login", strings.NewReader(`{}`))
+	req.Host = "hub.local:8380"
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "http://hub.local:8380")
+	if err := ValidateCSRF(req, ""); err != nil {
+		t.Fatalf("expected matching Origin to pass, got %v", err)
+	}
+
+	// POST with matching Referer when Origin is absent: accepted
+	req = httptest.NewRequest(http.MethodPost, "/hub/api/login", strings.NewReader(`{}`))
+	req.Host = "hub.local:8380"
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Referer", "http://hub.local:8380/login")
+	if err := ValidateCSRF(req, ""); err != nil {
+		t.Fatalf("expected matching Referer to pass, got %v", err)
+	}
+
+	// POST with configured publicURL: accepted
+	req = httptest.NewRequest(http.MethodPost, "/hub/api/login", strings.NewReader(`{}`))
+	req.Host = "internal-lan:8380"
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "https://hub.example.com")
+	if err := ValidateCSRF(req, "https://hub.example.com"); err != nil {
+		t.Fatalf("expected publicURL Origin to pass, got %v", err)
+	}
+}

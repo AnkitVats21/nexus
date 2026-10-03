@@ -1,0 +1,137 @@
+package auth
+
+import (
+	"crypto/rand"
+	"crypto/subtle"
+	"encoding/base64"
+	"errors"
+	"fmt"
+	"regexp"
+	"strconv"
+	"strings"
+
+	"golang.org/x/crypto/argon2"
+)
+
+const (
+	argonMemory    = 64 * 1024 // 64 MiB = 65536 KiB
+	argonTime      = 3
+	argonThreads   = 2
+	argonKeyLen    = 32
+	argonSaltLen   = 16
+	minPasswordLen = 10
+	argonVersion   = 19
+)
+
+var (
+	ErrPasswordTooShort = errors.New("password must be at least 10 characters")
+	ErrInvalidUsername  = errors.New("username must be 2-32 characters of letters, digits, '.', '_' or '-'")
+	ErrInvalidHash      = errors.New("invalid password hash format")
+	usernameRegex       = regexp.MustCompile(`^[a-zA-Z0-9._-]{2,32}$`)
+)
+
+// ValidateUsername checks if username matches [a-z0-9._-]{2,32}.
+func ValidateUsername(username string) error {
+	if !usernameRegex.MatchString(username) {
+		return ErrInvalidUsername
+	}
+	return nil
+}
+
+// HashPassword hashes a password using Argon2id with 64 MiB, t=3, p=2.
+func HashPassword(password string) (string, error) {
+	if len(password) < minPasswordLen {
+		return "", ErrPasswordTooShort
+	}
+
+	salt := make([]byte, argonSaltLen)
+	if _, err := rand.Read(salt); err != nil {
+		return "", fmt.Errorf("read salt: %w", err)
+	}
+
+	key := argon2.IDKey([]byte(password), salt, argonTime, argonMemory, argonThreads, argonKeyLen)
+
+	b64Salt := base64.RawStdEncoding.EncodeToString(salt)
+	b64Key := base64.RawStdEncoding.EncodeToString(key)
+
+	return fmt.Sprintf("$argon2id$v=%d$m=%d,t=%d,p=%d$%s$%s",
+		argonVersion, argonMemory, argonTime, argonThreads, b64Salt, b64Key), nil
+}
+
+// VerifyPassword checks if a password matches the standard encoded Argon2id hash.
+func VerifyPassword(password, encodedHash string) (bool, error) {
+	parts := strings.Split(encodedHash, "$")
+	if len(parts) != 6 || parts[1] != "argon2id" {
+		return false, ErrInvalidHash
+	}
+
+	var version int
+	if _, err := fmt.Sscanf(parts[2], "v=%d", &version); err != nil {
+		return false, ErrInvalidHash
+	}
+
+	var memory uint32
+	var time uint32
+	var threads uint8
+
+	for _, param := range strings.Split(parts[3], ",") {
+		kv := strings.SplitN(param, "=", 2)
+		if len(kv) != 2 {
+			continue
+		}
+		switch kv[0] {
+		case "m":
+			m, err := strconv.ParseUint(kv[1], 10, 32)
+			if err != nil {
+				return false, ErrInvalidHash
+			}
+			memory = uint32(m)
+		case "t":
+			t, err := strconv.ParseUint(kv[1], 10, 32)
+			if err != nil {
+				return false, ErrInvalidHash
+			}
+			time = uint32(t)
+		case "p":
+			p, err := strconv.ParseUint(kv[1], 10, 8)
+			if err != nil {
+				return false, ErrInvalidHash
+			}
+			threads = uint8(p)
+		}
+	}
+
+	if memory == 0 || time == 0 || threads == 0 {
+		return false, ErrInvalidHash
+	}
+
+	salt, err := base64.RawStdEncoding.DecodeString(parts[4])
+	if err != nil {
+		return false, ErrInvalidHash
+	}
+
+	key, err := base64.RawStdEncoding.DecodeString(parts[5])
+	if err != nil {
+		return false, ErrInvalidHash
+	}
+
+	derivedKey := argon2.IDKey([]byte(password), salt, time, memory, threads, uint32(len(key)))
+
+	if subtle.ConstantTimeCompare(derivedKey, key) == 1 {
+		return true, nil
+	}
+	return false, nil
+}
+
+// GenerateTempPassword creates a secure random temporary password for admin user creation/resets.
+func GenerateTempPassword() string {
+	const charset = "abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789"
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		panic(err)
+	}
+	for i := range b {
+		b[i] = charset[int(b[i])%len(charset)]
+	}
+	return string(b)
+}
