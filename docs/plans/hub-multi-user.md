@@ -168,6 +168,21 @@ service.
 - "Call Riya": hub tool `call {contact}`. Rings the devices currently bound
   to Riya (section 6), since that is where she is. First to answer takes
   it.
+- **Several devices ring at once**, like FaceTime or WhatsApp:
+  - The first to answer takes the call; the others stop ringing at once and
+    show "answered on Kitchen".
+  - Declining on any device declines everywhere; the caller is offered a
+    voice message.
+  - No answer in 30 s: missed on all, voice message offered.
+  - Skipped: a device already in a call, or in its do-not-disturb hours
+    (per device, so the bedroom speaker can stay quiet at night while the
+    phone still rings). A device in a voice session plays a soft tone and the
+    assistant says who is calling once its reply ends.
+  - The ring plays over music; answering pauses the music on that device and
+    it resumes after the call.
+- **Moving a live call:** "move the call to the kitchen" (or a tap in the
+  app) switches which device carries the call's audio without hanging up,
+  the way music moves between outputs.
 - Incoming call on a board: ring tone + LED pattern, then a short Gemini
   session: "Riya is calling. Answer?"
   - "Yes" (or the action key): connect.
@@ -234,6 +249,5 @@ standalone mode.
 
 - The home proxy for resolving on a server hub (arranged separately).
 
-Decided 2026-10-03: pairing code instead of a claim token (proposed, to
-confirm); voice messages are recordings; a call rings the devices bound to
+Decided 2026-10-03: pairing code instead of a claim token; voice messages are recordings; a call rings the devices bound to
 the callee; a server hub only resolves music, never carries it.
