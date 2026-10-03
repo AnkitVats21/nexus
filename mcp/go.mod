@@ -1,4 +1,4 @@
-module nexus-mcp
+module github.com/AnkitVats21/nexus-mcp
 
 go 1.25.4
 

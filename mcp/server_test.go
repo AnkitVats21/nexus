@@ -9,7 +9,7 @@ import (
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"nexus-mcp/tools"
+	"github.com/AnkitVats21/nexus-mcp/tools"
 )
 
 func TestAuthMiddleware(t *testing.T) {

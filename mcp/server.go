@@ -7,7 +7,7 @@ import (
 	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"nexus-mcp/tools"
+	"github.com/AnkitVats21/nexus-mcp/tools"
 )
 
 // ServerConfig configures the MCP server and HTTP transport.
