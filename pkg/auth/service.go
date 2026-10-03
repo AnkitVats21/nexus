@@ -38,6 +38,7 @@ type Service struct {
 
 	mu        sync.RWMutex
 	setupCode string
+	setupMu   sync.Mutex
 }
 
 // NewService creates a new auth Service, generating a first-run setup code if no users exist.
@@ -138,6 +139,9 @@ func (s *Service) Setup(ctx context.Context, setupCode, username, displayName, p
 		return nil, "", time.Time{}, ErrTooManyAttempts
 	}
 
+	s.setupMu.Lock()
+	defer s.setupMu.Unlock()
+
 	needed, err := s.SetupNeeded(ctx)
 	if err != nil {
 		return nil, "", time.Time{}, err
@@ -152,6 +156,9 @@ func (s *Service) Setup(ctx context.Context, setupCode, username, displayName, p
 	}
 
 	s.rateLimiter.ResetSetupFailures(ip)
+
+	// Consume setup code immediately to eliminate concurrency race
+	s.ClearSetupCode()
 
 	if err := ValidateUsername(username); err != nil {
 		return nil, "", time.Time{}, err
@@ -178,8 +185,6 @@ func (s *Service) Setup(ctx context.Context, setupCode, username, displayName, p
 	if err := s.store.CreateUser(ctx, u); err != nil {
 		return nil, "", time.Time{}, err
 	}
-
-	s.ClearSetupCode()
 
 	token, hash, err := GenerateSessionToken()
 	if err != nil {

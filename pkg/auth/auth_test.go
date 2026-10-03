@@ -414,3 +414,50 @@ func TestArgon2SemaphoreConcurrencyLimit(t *testing.T) {
 		t.Fatal("empty hash")
 	}
 }
+
+func TestConcurrentSetupRace(t *testing.T) {
+	_, svc, cleanup := newTestStoreAndAuth(t)
+	defer cleanup()
+
+	setupCode := svc.SetupCode()
+	if setupCode == "" {
+		t.Fatal("expected non-empty setup code")
+	}
+
+	const n = 5
+	errs := make(chan error, n)
+	for i := 0; i < n; i++ {
+		go func(idx int) {
+			_, _, _, err := svc.Setup(
+				context.Background(),
+				setupCode,
+				fmt.Sprintf("admin%d", idx),
+				"Admin",
+				"ValidPassword123!",
+				"ua",
+				fmt.Sprintf("192.168.1.%d", idx+1),
+			)
+			errs <- err
+		}(i)
+	}
+
+	successes := 0
+	setupNotNeeded := 0
+	for i := 0; i < n; i++ {
+		err := <-errs
+		if err == nil {
+			successes++
+		} else if errors.Is(err, ErrSetupNotNeeded) || errors.Is(err, ErrInvalidSetupCode) {
+			setupNotNeeded++
+		} else {
+			t.Errorf("unexpected error from concurrent setup: %v", err)
+		}
+	}
+
+	if successes != 1 {
+		t.Fatalf("expected exactly 1 successful setup, got %d", successes)
+	}
+	if setupNotNeeded != n-1 {
+		t.Fatalf("expected %d requests to fail with setup not needed or code consumed, got %d", n-1, setupNotNeeded)
+	}
+}
