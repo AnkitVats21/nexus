@@ -6,8 +6,8 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/AnkitVats21/nexus-mcp/tools"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 // ServerConfig configures the MCP server and HTTP transport.
@@ -44,56 +44,7 @@ func BuildMCPServer(cfg ServerConfig) (*mcp.Server, error) {
 		Version: "1.0.0",
 	}, nil)
 
-	newsSvc := cfg.NewsService
-	if newsSvc == nil {
-		newsSvc = tools.NewNewsService(nil)
-	}
-
-	weatherSvc := cfg.WeatherService
-	if weatherSvc == nil {
-		weatherSvc = tools.NewWeatherService(nil)
-	}
-
-	searchSvc := cfg.SearchService
-	if searchSvc == nil {
-		searchSvc = tools.NewSearchService(nil, "", "")
-	}
-
-	musicSvc := cfg.MusicService
-	if musicSvc == nil {
-		musicSvc = tools.NewMusicService(nil, "")
-	}
-
-	// 1. news_headlines
-	mcp.AddTool(server, &mcp.Tool{
-		Name:        "news_headlines",
-		Description: "Get top news headlines or search by topic/query for voice readout",
-	}, newsSvc.Handler())
-
-	// 2. web_search
-	mcp.AddTool(server, &mcp.Tool{
-		Name:        "web_search",
-		Description: "Search the web using Gemini with Google Search grounding for real-time information",
-	}, searchSvc.Handler())
-
-	// 3. weather
-	mcp.AddTool(server, &mcp.Tool{
-		Name:        "weather",
-		Description: "Get current weather conditions and 1-7 day forecast for any location",
-	}, weatherSvc.Handler())
-
-	// Device-only tools: the device calls these itself; it does not offer
-	// them to the voice model (tools.DeviceOnlyMeta).
-	mcp.AddTool(server, &mcp.Tool{
-		Name:        "music_search",
-		Description: "Search YouTube for songs (device use)",
-		Meta:        tools.DeviceOnlyMeta,
-	}, musicSvc.SearchHandler())
-	mcp.AddTool(server, &mcp.Tool{
-		Name:        "music_track",
-		Description: "A song's details, audio stream URL and related songs, by video id or search query (device use)",
-		Meta:        tools.DeviceOnlyMeta,
-	}, musicSvc.TrackHandler())
+	tools.NewRegistry(cfg.NewsService, cfg.WeatherService, cfg.SearchService, cfg.MusicService).Register(server)
 
 	return server, nil
 }

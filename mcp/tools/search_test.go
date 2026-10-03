@@ -34,8 +34,6 @@ func TestSearchServiceKeyResolution(t *testing.T) {
 
 	// 3. Missing key
 	svc3 := NewSearchService(nil, "", "")
-	t.Setenv("GEMINI_API_KEY", "")
-	t.Setenv("GEMINI_API_KEY_FILE", "")
 	_, err = svc3.resolveAPIKey()
 	if err == nil {
 		t.Fatalf("expected error when no key is configured")

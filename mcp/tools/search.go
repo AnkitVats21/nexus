@@ -56,20 +56,15 @@ func NewSearchService(client *http.Client, apiKey, keyFile string) *SearchServic
 	}
 }
 
-// resolveAPIKey retrieves the Gemini API key from explicit value, env, or key file.
+// resolveAPIKey retrieves the Gemini API key from the configured value or key
+// file (the caller reads the environment, this package does not).
 // It never prints or logs the key.
 func (s *SearchService) resolveAPIKey() (string, error) {
 	if key := strings.TrimSpace(s.APIKey); key != "" {
 		return key, nil
 	}
-	if key := strings.TrimSpace(os.Getenv("GEMINI_API_KEY")); key != "" {
-		return key, nil
-	}
 
 	keyPath := strings.TrimSpace(s.KeyFile)
-	if keyPath == "" {
-		keyPath = strings.TrimSpace(os.Getenv("GEMINI_API_KEY_FILE"))
-	}
 	if keyPath != "" {
 		data, err := os.ReadFile(keyPath)
 		if err != nil {
@@ -81,7 +76,7 @@ func (s *SearchService) resolveAPIKey() (string, error) {
 		}
 	}
 
-	return "", fmt.Errorf("no Gemini API key configured (set GEMINI_API_KEY or GEMINI_API_KEY_FILE)")
+	return "", fmt.Errorf("no Gemini API key configured (set an API key or key file)")
 }
 
 type geminiReqContent struct {
