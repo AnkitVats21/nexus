@@ -36,10 +36,10 @@ type WebSocketTransport struct {
 func NewWebSocketTransport() *WebSocketTransport {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &WebSocketTransport{
-		log:   slog.Default().With("component", "transport_ws"),
-		msgCh: make(chan []byte, 64),
-		errCh: make(chan error, 16),
-		ctx:   ctx,
+		log:    slog.Default().With("component", "transport_ws"),
+		msgCh:  make(chan []byte, 64),
+		errCh:  make(chan error, 16),
+		ctx:    ctx,
 		cancel: cancel,
 	}
 }

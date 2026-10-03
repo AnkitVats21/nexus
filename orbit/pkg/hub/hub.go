@@ -336,14 +336,8 @@ func (h *Hub) negotiateUplink(roles *edgeRoles) string {
 			break
 		}
 	}
-	mode := strings.ToLower(strings.TrimSpace(h.cfg.Uplink))
-	switch mode {
+	switch strings.ToLower(strings.TrimSpace(h.cfg.Uplink)) {
 	case "pcm":
-		return "pcm"
-	case "opus", "auto", "":
-		if hasOpus16 {
-			return "opus"
-		}
 		return "pcm"
 	default:
 		if hasOpus16 {

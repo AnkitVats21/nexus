@@ -52,6 +52,15 @@ func main() {
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
 	slog.SetDefault(log)
 
+	*uplink = strings.ToLower(strings.TrimSpace(*uplink))
+	switch *uplink {
+	case "auto", "pcm", "opus":
+	default:
+		log.Error("Invalid --uplink value", "uplink", *uplink)
+		fmt.Fprintf(os.Stderr, "invalid --uplink %q: must be auto, pcm, or opus\n", *uplink)
+		os.Exit(1)
+	}
+
 	tokens, err := readTokens(*tokenFile)
 	if err != nil {
 		log.Error("No board tokens", "file", *tokenFile, "err", err)

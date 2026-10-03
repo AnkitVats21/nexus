@@ -52,8 +52,8 @@ func TestNegotiationTable(t *testing.T) {
 			wantUp:     "pcm",
 		},
 		{
-			name:       "empty up list defaults to pcm",
-			hubUplink:  "auto",
+			name:      "empty up list defaults to pcm",
+			hubUplink: "auto",
 			helloRoles: &edgeRoles{Voice: &struct {
 				Up   []string `json:"up"`
 				Down []string `json:"down"`
@@ -61,8 +61,8 @@ func TestNegotiationTable(t *testing.T) {
 			wantUp: "pcm",
 		},
 		{
-			name:       "pcm16 only edge gets pcm under auto",
-			hubUplink:  "auto",
+			name:      "pcm16 only edge gets pcm under auto",
+			hubUplink: "auto",
 			helloRoles: &edgeRoles{Voice: &struct {
 				Up   []string `json:"up"`
 				Down []string `json:"down"`
@@ -70,8 +70,8 @@ func TestNegotiationTable(t *testing.T) {
 			wantUp: "pcm",
 		},
 		{
-			name:       "opus16 offered gets opus under auto",
-			hubUplink:  "auto",
+			name:      "opus16 offered gets opus under auto",
+			hubUplink: "auto",
 			helloRoles: &edgeRoles{Voice: &struct {
 				Up   []string `json:"up"`
 				Down []string `json:"down"`
@@ -79,8 +79,8 @@ func TestNegotiationTable(t *testing.T) {
 			wantUp: "opus",
 		},
 		{
-			name:       "opus16 offered gets opus with hub uplink=opus",
-			hubUplink:  "opus",
+			name:      "opus16 offered gets opus with hub uplink=opus",
+			hubUplink: "opus",
 			helloRoles: &edgeRoles{Voice: &struct {
 				Up   []string `json:"up"`
 				Down []string `json:"down"`
@@ -88,8 +88,8 @@ func TestNegotiationTable(t *testing.T) {
 			wantUp: "opus",
 		},
 		{
-			name:       "pcm-only edge gets pcm even with hub uplink=opus",
-			hubUplink:  "opus",
+			name:      "pcm-only edge gets pcm even with hub uplink=opus",
+			hubUplink: "opus",
 			helloRoles: &edgeRoles{Voice: &struct {
 				Up   []string `json:"up"`
 				Down []string `json:"down"`
@@ -97,8 +97,8 @@ func TestNegotiationTable(t *testing.T) {
 			wantUp: "pcm",
 		},
 		{
-			name:       "opus-offering edge gets pcm when hub uplink=pcm",
-			hubUplink:  "pcm",
+			name:      "opus-offering edge gets pcm when hub uplink=pcm",
+			hubUplink: "pcm",
 			helloRoles: &edgeRoles{Voice: &struct {
 				Up   []string `json:"up"`
 				Down []string `json:"down"`
