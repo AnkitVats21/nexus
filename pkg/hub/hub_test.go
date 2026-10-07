@@ -333,4 +333,3 @@ func TestAPIProxyUnreachable(t *testing.T) {
 		t.Fatalf("proxy took too long to fail: %v (want <= ~2s)", elapsed)
 	}
 }
-

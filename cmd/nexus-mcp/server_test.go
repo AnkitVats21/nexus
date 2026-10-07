@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"nexus/pkg/tools"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"nexus/pkg/tools"
 )
 
 func TestAuthMiddleware(t *testing.T) {

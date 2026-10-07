@@ -446,4 +446,3 @@ func TestResolveOnly(t *testing.T) {
 		t.Fatalf("second play url = %v, want direct CDN %v", p2["url"], cdn.URL+"/a")
 	}
 }
-

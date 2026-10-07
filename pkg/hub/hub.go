@@ -38,19 +38,19 @@ import (
 )
 
 const (
-	ProtocolVersion  = 2
-	EdgePath         = "/hub/edge"
-	BoardPath        = "/hub/board" // proto 1 boards; the same endpoint
+	ProtocolVersion = 2
+	EdgePath        = "/hub/edge"
+	BoardPath       = "/hub/board" // proto 1 boards; the same endpoint
 
 	helloTimeout     = 10 * time.Second
 	pingInterval     = 5 * time.Second
 	edgePingInterval = 10 * time.Second
 	pingTimeout      = 10 * time.Second
-	writeTimeout    = 5 * time.Second
-	browserQueueLen = 64
-	boardQueueLen   = 64
-	maxBoardMessage = 256 << 10
-	maxBrowserFrame = 4 << 10
+	writeTimeout     = 5 * time.Second
+	browserQueueLen  = 64
+	boardQueueLen    = 64
+	maxBoardMessage  = 256 << 10
+	maxBrowserFrame  = 4 << 10
 
 	// Close codes.
 	closeRejected     = websocket.StatusCode(4001)
