@@ -47,6 +47,7 @@ func main() {
 		"Invidious-compatible API (invidious-daemon) for music lookups, after MCP (default $NEXUS_INVIDIOUS_URL)")
 	cacheDir := flag.String("cache-dir", filepath.Join(home, ".cache", "nexus-hub", "music"), "songs kept for the players")
 	cacheMB := flag.Int("cache-max-mb", 2048, "music cache size (0 = no cache)")
+	resolveOnly := flag.Bool("resolve-only", false, "resolve songs only; never download or serve music bytes (forces cache off; requires a resolver)")
 	debug := flag.Bool("debug", false, "debug logging")
 	flag.Parse()
 
@@ -141,15 +142,24 @@ func main() {
 			}
 		}
 	}
+	if *resolveOnly {
+		if tracks == nil {
+			log.Error("--resolve-only requires a music resolver (--music-api, --invidious-url, or --mcp-url)")
+			fmt.Fprintf(os.Stderr, "--resolve-only requires a music resolver (--music-api, --invidious-url, or --mcp-url)\n")
+			os.Exit(1)
+		}
+		log.Info("resolve-only mode: music cache disabled, streaming direct to players")
+	}
 	var cache *hub.MusicCache
-	if tracks != nil && *cacheMB > 0 {
+	if tracks != nil && *cacheMB > 0 && !*resolveOnly {
 		if cache, err = hub.NewMusicCache(*cacheDir, int64(*cacheMB)<<20, log); err != nil {
 			log.Warn("No music cache", "dir", *cacheDir, "err", err)
 			cache = nil
 		}
 	}
 	h := hub.New(hub.Config{Version: version, Tokens: tokens, WebDir: *webDir, Log: log,
-		GeminiKey: geminiKey, Uplink: *uplink, MCP: mcp, Tracks: tracks, Cache: cache})
+		GeminiKey: geminiKey, Uplink: *uplink, MCP: mcp, Tracks: tracks, Cache: cache,
+		ResolveOnly: *resolveOnly})
 	srv := &http.Server{Addr: *listen, Handler: h.Handler(), ReadHeaderTimeout: 10 * time.Second}
 
 	ln, err := net.Listen("tcp", *listen)

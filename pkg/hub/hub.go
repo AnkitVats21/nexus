@@ -79,6 +79,8 @@ type Config struct {
 	Tracks TrackSource
 	// Songs kept for the players (nil = none; they stream from YouTube).
 	Cache *MusicCache
+	// ResolveOnly disables caching and serving song bytes, resolving stream URLs only.
+	ResolveOnly bool
 }
 
 type Hub struct {
@@ -167,6 +169,9 @@ func New(cfg Config) *Hub {
 	}
 	if cfg.VoiceLead <= 0 {
 		cfg.VoiceLead = defaultVoiceLead
+	}
+	if cfg.ResolveOnly {
+		cfg.Cache = nil
 	}
 	h := &Hub{
 		cfg:        cfg,
