@@ -1,0 +1,21 @@
+[Unit]
+Description=Nexus Hub Mesh Coordinator & Bridge (Lightsail Pilot)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nexus
+Group=nexus
+WorkingDirectory=/home/nexus
+ExecStart=/home/nexus/bin/nexus-hub --listen=127.0.0.1:8380 --mdns=false --resolve-only --invidious-url=https://stream.example.com --token-file=/home/nexus/.config/nexus/hub_tokens --gemini-key-file=/home/nexus/.config/nexus/gemini_key
+Restart=always
+RestartSec=5s
+LimitNOFILE=65536
+
+# Sandboxing
+ProtectSystem=full
+ProtectHome=false
+
+[Install]
+WantedBy=multi-user.target
