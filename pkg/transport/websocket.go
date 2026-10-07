@@ -2,10 +2,13 @@ package transport
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"log/slog"
 	"math/rand"
+	"net/http"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -27,9 +30,17 @@ type WebSocketTransport struct {
 	onConnected   func()
 	onConnectedMu sync.RWMutex
 
-	closed atomic.Bool
-	ctx    context.Context
-	cancel context.CancelFunc
+	closed  atomic.Bool
+	ctx     context.Context
+	cancel  context.CancelFunc
+	rootCAs *x509.CertPool
+}
+
+// SetRootCAs configures a custom root CA pool for TLS certificate verification.
+// This is a test-only hook used by unit tests to trust a test server's certificate.
+// Production code never bypasses verification and relies on system roots.
+func (t *WebSocketTransport) SetRootCAs(pool *x509.CertPool) {
+	t.rootCAs = pool
 }
 
 // NewWebSocketTransport creates a new WebSocketTransport.
@@ -97,8 +108,21 @@ func (t *WebSocketTransport) reconnectLoop() {
 	for !t.closed.Load() {
 		t.log.Info("Connecting to Nexus Core WebSocket", "endpoint", t.endpoint)
 
+		var opts *websocket.DialOptions
+		if t.rootCAs != nil {
+			opts = &websocket.DialOptions{
+				HTTPClient: &http.Client{
+					Transport: &http.Transport{
+						TLSClientConfig: &tls.Config{
+							RootCAs: t.rootCAs,
+						},
+					},
+				},
+			}
+		}
+
 		dialCtx, dialCancel := context.WithTimeout(t.ctx, 5*time.Second)
-		conn, _, err := websocket.Dial(dialCtx, t.endpoint, nil)
+		conn, _, err := websocket.Dial(dialCtx, t.endpoint, opts)
 		dialCancel()
 
 		if err != nil {
