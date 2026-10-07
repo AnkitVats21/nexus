@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -215,3 +216,121 @@ func TestTranscriptCap(t *testing.T) {
 		t.Fatalf("oldest kept id %d, want 6", first.ID)
 	}
 }
+
+func TestPingRTT(t *testing.T) {
+	var ps pingStats
+	if ps.summary() != nil {
+		t.Fatal("expected nil summary for 0 pings")
+	}
+	ps.record(20 * time.Millisecond)
+	ps.record(10 * time.Millisecond)
+	ps.record(30 * time.Millisecond)
+
+	s := ps.summary()
+	if s["last"] != int64(30) {
+		t.Fatalf("last = %v, want 30", s["last"])
+	}
+	if s["min"] != int64(10) {
+		t.Fatalf("min = %v, want 10", s["min"])
+	}
+	if s["avg"] != 20.0 {
+		t.Fatalf("avg = %v, want 20.0", s["avg"])
+	}
+}
+
+func TestReplyTimingBookkeeping(t *testing.T) {
+	h := New(Config{Version: "test", Tokens: []string{testToken}})
+	srv := httptest.NewServer(h.Handler())
+	defer srv.Close()
+
+	// Record 12 replies to verify last 10 cap
+	for i := 1; i <= 12; i++ {
+		h.recordReply(ReplyTiming{
+			EdgeID:      "edge-1",
+			How:         "complete",
+			AudioMs:     int64(i * 100),
+			SpanMs:      int64(i * 50),
+			HubDelayMs:  int64(i * 10),
+			EdgeDelayMs: int64(i*10 + 5),
+		})
+	}
+
+	res, err := http.Get(srv.URL + "/hub/status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	var status map[string]any
+	if err := json.NewDecoder(res.Body).Decode(&status); err != nil {
+		t.Fatal(err)
+	}
+
+	replies, ok := status["replies"].([]any)
+	if !ok {
+		t.Fatalf("expected replies array in status, got %v", status["replies"])
+	}
+	if len(replies) != 10 {
+		t.Fatalf("expected 10 replies in status, got %d", len(replies))
+	}
+
+	first := replies[0].(map[string]any)
+	if int64(first["audio_ms"].(float64)) != 300 {
+		t.Fatalf("expected oldest reply to be #3 (audio_ms=300), got %v", first["audio_ms"])
+	}
+	last := replies[9].(map[string]any)
+	if int64(last["audio_ms"].(float64)) != 1200 {
+		t.Fatalf("expected newest reply to be #12 (audio_ms=1200), got %v", last["audio_ms"])
+	}
+	if int64(last["hub_delay_ms"].(float64)) != 120 || int64(last["edge_delay_ms"].(float64)) != 125 {
+		t.Fatalf("expected hub_delay=120, edge_delay=125, got %v, %v", last["hub_delay_ms"], last["edge_delay_ms"])
+	}
+}
+
+func TestAPIProxyUnreachable(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	h := New(Config{Version: "test", Tokens: []string{testToken}})
+	srv := httptest.NewServer(h.Handler())
+	defer srv.Close()
+
+	// Connect a board that points to a closed port on localhost.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	closedPort := ln.Addr().(*net.TCPAddr).Port
+	ln.Close()
+
+	conn := dial(t, ctx, "ws"+strings.TrimPrefix(srv.URL, "http")+BoardPath)
+	defer conn.Close(websocket.StatusNormalClosure, "")
+	write(t, ctx, conn, map[string]any{
+		"type": "hello", "proto": 1, "id": "deadboard", "name": "DeadBoard", "fw": "test",
+		"http_port": closedPort, "token": testToken,
+	})
+	_ = read(t, ctx, conn)
+
+	t0 := time.Now()
+	res, err := http.Get(srv.URL + "/api/test")
+	elapsed := time.Since(t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+
+	if res.StatusCode != http.StatusBadGateway {
+		t.Fatalf("status: %d, want 502", res.StatusCode)
+	}
+	if ctype := res.Header.Get("Content-Type"); !strings.HasPrefix(ctype, "application/json") {
+		t.Fatalf("content-type: %q, want application/json", ctype)
+	}
+	body, _ := io.ReadAll(res.Body)
+	wantBody := `{"status":"error","message":"board not reachable from the hub"}`
+	if string(body) != wantBody {
+		t.Fatalf("body: %q, want %q", body, wantBody)
+	}
+	if elapsed > 4*time.Second {
+		t.Fatalf("proxy took too long to fail: %v (want <= ~2s)", elapsed)
+	}
+}
+
