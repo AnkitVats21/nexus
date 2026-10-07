@@ -131,3 +131,16 @@ The tools package (`pkg/tools`) supports two operational modes:
 ./bin/nexus-hub --web web/apps/hub/dist
 ```
 *(Embedded binary assets via `go:embed` will be introduced in a future release).*
+
+---
+
+## 6. Server Deployment (Lightsail Pilot)
+
+The hub can be deployed to a remote server (e.g. AWS Lightsail) in `--resolve-only` mode:
+
+- **`--resolve-only`**: Resolves song metadata and stream URLs for players without caching or relaying audio bytes.
+- **WebSocket & TLS**: Supports `wss://` with verified system root TLS certificates.
+- **Timing & RTT**: Pings connected edges every 10s and tracks round-trip time (`rtt_ms` in `/hub/status`), as well as reply latencies (`hub_delay_ms`, `edge_delay_ms`).
+- **Systemd & Nginx**: Configuration files are provided in `deploy/nexus-hub.service` and `deploy/nginx-hub.conf`.
+- **Runbook**: Step-by-step instructions for server build, certbot TLS, and systemd service setup are documented in [deploy-server.md](docs/deploy-server.md).
+

@@ -36,7 +36,7 @@ messages to edges that declared it.
 
 ## 3. Connection
 
-One WebSocket per edge to `ws://<hub>:8380/hub/edge` (`/hub/board` is the
+One WebSocket per edge to `ws://<hub>:8380/hub/edge` or TLS `wss://<hub>/hub/edge` (`/hub/board` is the
 same endpoint, kept for proto 1 boards). The hub advertises
 `_nexus-hub._tcp` over mDNS.
 
@@ -59,9 +59,10 @@ same endpoint, kept for proto 1 boards). The hub advertises
 - An edge may dynamically alternate between Opus and PCM frames within the same session without reconnecting.
 - Malformed frames (e.g. truncated length header or packet length exceeding frame) are dropped without terminating the session.
 
-- **Liveness:** WebSocket ping every 5 s from both sides; no pong for 10 s,
-  or a closed socket, means the link is down. These are protocol pings, not
-  JSON.
+- **Liveness & RTT:** WebSocket ping every 10 s from the hub to edges with round-trip
+  time (RTT) recorded (`last`, `min`, `avg` in `/hub/status` per edge).
+  Browser connections ping every 5 s. No pong for 10 s, or a closed socket,
+  means the link is down. These are protocol pings, not JSON.
 - **Reconnect:** the edge reconnects with backoff (1 s doubling to 30 s).
   After `rejected` it waits 5 minutes or for a settings change.
 - **One connection per id:** a second connection with the same `id` replaces
@@ -236,7 +237,8 @@ The ESP board only. It pushes its state JSON (no `type`) on change and every
 second, and `transcript` messages; the hub fans them out to browsers on its
 own `/api/ws`, and forwards a browser's `{"cmd": ...}` to the board as is.
 The hub proxies `/api/*` to the board's HTTP server (its address as the hub
-sees it, port `state.http_port`).
+sees it, port `state.http_port`) with a 2-second dial timeout. If the board is
+unreachable, the proxy returns HTTP 502 with `{"status":"error","message":"board not reachable from the hub"}`.
 
 ## 7. Versions
 
