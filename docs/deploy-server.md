@@ -197,10 +197,8 @@ Orbit requires the server's authentication token. Keep your home hub token file 
 
 ```bash
 # 1. Create a dedicated server token file on the home machine (mode 600)
-(umask 077 && cat << 'EOF' > ~/.config/nexus/server_hub_token
-<PASTE_SERVER_TOKEN_HERE>
-EOF
-)
+(umask 077 && touch ~/.config/nexus/server_hub_token)
+${EDITOR:-nano} ~/.config/nexus/server_hub_token   # paste the server token as the only line (heredocs and echo end up in shell history)
 chmod 600 ~/.config/nexus/server_hub_token
 
 # 2. Launch Orbit pointing to the Lightsail server
@@ -214,13 +212,9 @@ To avoid exposing the server token in your workstation's shell history, send the
 
 ```bash
 # 1. Create a temporary config payload with umask 077
-(umask 077 && cat << 'EOF' > /tmp/hub_config.json
-{
-  "url": "wss://hub.example.com/hub/board",
-  "token": "<PASTE_SERVER_TOKEN_HERE>"
-}
-EOF
-)
+(umask 077 && touch /tmp/hub_config.json)
+${EDITOR:-nano} /tmp/hub_config.json   # type the JSON below in the editor (heredocs and echo end up in shell history):
+#   {"url": "wss://hub.example.com/hub/board", "token": "<server token>"}
 
 # 2. Send configuration to the board via local REST API
 curl -X POST http://<board-ip>/api/hub -H "Content-Type: application/json" -d @/tmp/hub_config.json
@@ -239,7 +233,7 @@ rm -f /tmp/hub_config.json
 
 1. **HTTP Status**:
    ```bash
-   curl -i -u pilotadmin:<password> https://hub.example.com/hub/status
+   curl -i -u pilotadmin https://hub.example.com/hub/status   # curl asks for the password
    ```
    Should return JSON with `"version"`, `"music": true`, and connected edges with live RTT:
    ```json
@@ -282,13 +276,8 @@ If the pilot server link exhibits excessive latency or issues, roll back devices
 3. **Redirect Waveshare Board**:
    Restore the board to the home hub via local REST API:
    ```bash
-   (umask 077 && cat << 'EOF' > /tmp/hub_home.json
-   {
-     "url": "ws://nexus.local:8380/hub/board",
-     "token": "<HOME_HUB_TOKEN>"
-   }
-   EOF
-   )
+   (umask 077 && touch /tmp/hub_home.json)
+   ${EDITOR:-nano} /tmp/hub_home.json   # type: {"url": "ws://nexus.local:8380/hub/board", "token": "<home hub token>"}
    curl -X POST http://<board-ip>/api/hub -H "Content-Type: application/json" -d @/tmp/hub_home.json
    rm -f /tmp/hub_home.json
    ```
