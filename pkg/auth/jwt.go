@@ -153,6 +153,8 @@ func (j *JWTService) VerifyToken(tokenStr string) (*JWTClaims, error) {
 		jwt.WithIssuer("nexus-hub"),
 		jwt.WithAudience("nexus"),
 		jwt.WithLeeway(30*time.Second),
+		jwt.WithExpirationRequired(),
+		jwt.WithIssuedAt(),
 	)
 
 	token, err := parser.Parse(tokenStr, func(t *jwt.Token) (any, error) {

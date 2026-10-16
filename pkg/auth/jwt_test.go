@@ -209,6 +209,22 @@ func TestJWT_StrictVerificationRejections(t *testing.T) {
 	if _, err := svc.VerifyToken(leewayStr); err != nil {
 		t.Fatalf("expected token within 30s leeway to be accepted, got error: %v", err)
 	}
+
+	// 7. Reject token without exp claim (WithExpirationRequired)
+	noExpClaims := jwt.MapClaims{
+		"iss":  "nexus-hub",
+		"aud":  "nexus",
+		"sub":  "1",
+		"name": "alice",
+		"role": "member",
+		"iat":  time.Now().Unix(),
+	}
+	noExpToken := jwt.NewWithClaims(jwt.SigningMethodEdDSA, noExpClaims)
+	noExpToken.Header["kid"] = svc.Kid()
+	noExpStr, _ := noExpToken.SignedString(privKey)
+	if _, err := svc.VerifyToken(noExpStr); err == nil {
+		t.Fatal("expected VerifyToken to reject token without exp claim")
+	}
 }
 
 func TestRefreshHelpersAndRateLimiter(t *testing.T) {
