@@ -2,8 +2,10 @@ package store
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"embed"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"os"
@@ -1353,6 +1355,1024 @@ func (s *Store) PruneRefreshTokens(ctx context.Context, now int64) (int64, error
 	n, err := res.RowsAffected()
 	if err != nil {
 		return 0, fmt.Errorf("prune refresh tokens rows affected: %w", err)
+	}
+	return n, nil
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Music Library (tracks, likes, playlists, history, library_versions)
+// ─────────────────────────────────────────────────────────────────────────────
+
+func randomURLSafeID(n int) string {
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		panic(fmt.Sprintf("crypto/rand failed: %v", err))
+	}
+	return base64.RawURLEncoding.EncodeToString(b)
+}
+
+func upsertTrackTx(ctx context.Context, tx *sql.Tx, t Track, now int64) error {
+	if t.ID == "" {
+		return errors.New("empty track id")
+	}
+	if now == 0 {
+		now = time.Now().UTC().Unix()
+	}
+	var album any
+	if t.Album != "" {
+		album = t.Album
+	}
+	var thumb any
+	if t.Thumbnail != "" {
+		thumb = t.Thumbnail
+	}
+
+	_, err := tx.ExecContext(ctx, `
+		INSERT INTO tracks (video_id, title, artist, album, duration_s, thumb_url, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(video_id) DO UPDATE SET
+			title = excluded.title,
+			artist = excluded.artist,
+			album = excluded.album,
+			duration_s = excluded.duration_s,
+			thumb_url = excluded.thumb_url,
+			updated_at = excluded.updated_at
+	`, t.ID, t.Title, t.Artist, album, t.Duration, thumb, now)
+	if err != nil {
+		return fmt.Errorf("upsert track %s: %w", t.ID, err)
+	}
+	return nil
+}
+
+// UpsertTrack inserts or updates a track metadata snapshot.
+func (s *Store) UpsertTrack(ctx context.Context, t *Track) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if err := upsertTrackTx(ctx, tx, *t, time.Now().UTC().Unix()); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// GetLibraryVersions returns the current sync versions for a user.
+func (s *Store) GetLibraryVersions(ctx context.Context, userID int64) (LibraryVersions, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var lv LibraryVersions
+	lv.UserID = userID
+	row := s.db.QueryRowContext(ctx, `
+		SELECT likes_version, playlists_version, history_version
+		FROM library_versions WHERE user_id = ?
+	`, userID)
+	if err := row.Scan(&lv.LikesVersion, &lv.PlaylistsVersion, &lv.HistoryVersion); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return lv, nil
+		}
+		return lv, fmt.Errorf("get library versions: %w", err)
+	}
+	return lv, nil
+}
+
+func bumpLikesVersionTx(ctx context.Context, tx *sql.Tx, userID int64) (int64, error) {
+	_, err := tx.ExecContext(ctx, `
+		INSERT INTO library_versions (user_id, likes_version, playlists_version, history_version)
+		VALUES (?, 1, 0, 0)
+		ON CONFLICT(user_id) DO UPDATE SET likes_version = likes_version + 1
+	`, userID)
+	if err != nil {
+		return 0, fmt.Errorf("bump likes_version: %w", err)
+	}
+	var newVer int64
+	if err := tx.QueryRowContext(ctx, `SELECT likes_version FROM library_versions WHERE user_id = ?`, userID).Scan(&newVer); err != nil {
+		return 0, fmt.Errorf("query bumped likes_version: %w", err)
+	}
+	return newVer, nil
+}
+
+func bumpPlaylistsVersionTx(ctx context.Context, tx *sql.Tx, userID int64) (int64, error) {
+	_, err := tx.ExecContext(ctx, `
+		INSERT INTO library_versions (user_id, likes_version, playlists_version, history_version)
+		VALUES (?, 0, 1, 0)
+		ON CONFLICT(user_id) DO UPDATE SET playlists_version = playlists_version + 1
+	`, userID)
+	if err != nil {
+		return 0, fmt.Errorf("bump playlists_version: %w", err)
+	}
+	var newVer int64
+	if err := tx.QueryRowContext(ctx, `SELECT playlists_version FROM library_versions WHERE user_id = ?`, userID).Scan(&newVer); err != nil {
+		return 0, fmt.Errorf("query bumped playlists_version: %w", err)
+	}
+	return newVer, nil
+}
+
+func bumpHistoryVersionTx(ctx context.Context, tx *sql.Tx, userID int64) (int64, error) {
+	_, err := tx.ExecContext(ctx, `
+		INSERT INTO library_versions (user_id, likes_version, playlists_version, history_version)
+		VALUES (?, 0, 0, 1)
+		ON CONFLICT(user_id) DO UPDATE SET history_version = history_version + 1
+	`, userID)
+	if err != nil {
+		return 0, fmt.Errorf("bump history_version: %w", err)
+	}
+	var newVer int64
+	if err := tx.QueryRowContext(ctx, `SELECT history_version FROM library_versions WHERE user_id = ?`, userID).Scan(&newVer); err != nil {
+		return 0, fmt.Errorf("query bumped history_version: %w", err)
+	}
+	return newVer, nil
+}
+
+// PutLike adds a song to user's likes. Idempotent: preserves original liked_at, upserts track, bumps likes_version.
+func (s *Store) PutLike(ctx context.Context, userID int64, t Track, likedAt int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if likedAt == 0 {
+		likedAt = time.Now().UTC().UnixMilli()
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if err := upsertTrackTx(ctx, tx, t, time.Now().UTC().Unix()); err != nil {
+		return err
+	}
+
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO likes (user_id, video_id, liked_at)
+		VALUES (?, ?, ?)
+		ON CONFLICT(user_id, video_id) DO NOTHING
+	`, userID, t.ID, likedAt)
+	if err != nil {
+		return fmt.Errorf("insert like: %w", err)
+	}
+
+	if _, err := bumpLikesVersionTx(ctx, tx, userID); err != nil {
+		return err
+	}
+
+	return tx.Commit()
+}
+
+// DeleteLike removes a song from user's likes. Idempotent: bumps likes_version.
+func (s *Store) DeleteLike(ctx context.Context, userID int64, videoID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	_, err = tx.ExecContext(ctx, `DELETE FROM likes WHERE user_id = ? AND video_id = ?`, userID, videoID)
+	if err != nil {
+		return fmt.Errorf("delete like: %w", err)
+	}
+
+	if _, err := bumpLikesVersionTx(ctx, tx, userID); err != nil {
+		return err
+	}
+
+	return tx.Commit()
+}
+
+// GetLikes returns liked tracks newest first with pagination.
+func (s *Store) GetLikes(ctx context.Context, userID int64, limit, offset int) ([]Like, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if limit <= 0 {
+		limit = 50
+	}
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT l.user_id, l.video_id, l.liked_at,
+		       t.title, t.artist, t.album, t.duration_s, t.thumb_url, t.updated_at
+		FROM likes l
+		JOIN tracks t ON l.video_id = t.video_id
+		WHERE l.user_id = ?
+		ORDER BY l.liked_at DESC
+		LIMIT ? OFFSET ?
+	`, userID, limit, offset)
+	if err != nil {
+		return nil, fmt.Errorf("query likes: %w", err)
+	}
+	defer rows.Close()
+
+	var out []Like
+	for rows.Next() {
+		var l Like
+		var album, thumb sql.NullString
+		if err := rows.Scan(
+			&l.UserID, &l.VideoID, &l.LikedAt,
+			&l.Track.Title, &l.Track.Artist, &album, &l.Track.Duration, &thumb, &l.Track.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan like: %w", err)
+		}
+		l.Track.ID = l.VideoID
+		if album.Valid {
+			l.Track.Album = album.String
+		}
+		if thumb.Valid {
+			l.Track.Thumbnail = thumb.String
+		}
+		out = append(out, l)
+	}
+	return out, rows.Err()
+}
+
+// GetLikedIDs returns all liked video IDs for a user (newest first).
+func (s *Store) GetLikedIDs(ctx context.Context, userID int64) ([]string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT video_id FROM likes WHERE user_id = ? ORDER BY liked_at DESC
+	`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("query liked ids: %w", err)
+	}
+	defer rows.Close()
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan liked id: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// CreatePlaylist creates a new playlist for the user. Enforces 500 playlists limit.
+func (s *Store) CreatePlaylist(ctx context.Context, p *Playlist) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	var count int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM playlists WHERE user_id = ?`, p.UserID).Scan(&count); err != nil {
+		return fmt.Errorf("count playlists: %w", err)
+	}
+	if count >= 500 {
+		return ErrLimitExceeded
+	}
+
+	if p.ID == "" {
+		p.ID = randomURLSafeID(16)
+	}
+	if p.CreatedAt == 0 {
+		p.CreatedAt = time.Now().UTC().Unix()
+	}
+	p.UpdatedAt = p.CreatedAt
+	p.Version = 1
+
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO playlists (id, user_id, name, created_at, updated_at, version)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, p.ID, p.UserID, p.Name, p.CreatedAt, p.UpdatedAt, p.Version)
+	if err != nil {
+		return fmt.Errorf("insert playlist: %w", err)
+	}
+
+	if _, err := bumpPlaylistsVersionTx(ctx, tx, p.UserID); err != nil {
+		return err
+	}
+
+	return tx.Commit()
+}
+
+// GetPlaylists returns all playlists for a user with count and up to 4 thumbnails.
+func (s *Store) GetPlaylists(ctx context.Context, userID int64) ([]Playlist, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT p.id, p.user_id, p.name, p.created_at, p.updated_at, p.version, COUNT(pi.item_id)
+		FROM playlists p
+		LEFT JOIN playlist_items pi ON p.id = pi.playlist_id
+		WHERE p.user_id = ?
+		GROUP BY p.id
+		ORDER BY p.updated_at DESC
+	`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("query playlists: %w", err)
+	}
+	defer rows.Close()
+
+	var playlists []Playlist
+	playlistMap := make(map[string]int) // id -> index in playlists
+	for rows.Next() {
+		var pl Playlist
+		if err := rows.Scan(&pl.ID, &pl.UserID, &pl.Name, &pl.CreatedAt, &pl.UpdatedAt, &pl.Version, &pl.Count); err != nil {
+			return nil, fmt.Errorf("scan playlist: %w", err)
+		}
+		pl.Thumbnails = []string{}
+		playlistMap[pl.ID] = len(playlists)
+		playlists = append(playlists, pl)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	if len(playlists) == 0 {
+		return playlists, nil
+	}
+
+	// Fetch up to 4 thumbnails per playlist in order of position ASC
+	thumbRows, err := s.db.QueryContext(ctx, `
+		SELECT pi.playlist_id, t.thumb_url
+		FROM playlist_items pi
+		JOIN tracks t ON pi.video_id = t.video_id
+		JOIN playlists p ON pi.playlist_id = p.id
+		WHERE p.user_id = ? AND t.thumb_url IS NOT NULL AND t.thumb_url != ''
+		ORDER BY pi.playlist_id, pi.position ASC
+	`, userID)
+	if err == nil {
+		defer thumbRows.Close()
+		for thumbRows.Next() {
+			var pid, thumb string
+			if err := thumbRows.Scan(&pid, &thumb); err == nil {
+				if idx, ok := playlistMap[pid]; ok {
+					if len(playlists[idx].Thumbnails) < 4 {
+						playlists[idx].Thumbnails = append(playlists[idx].Thumbnails, thumb)
+					}
+				}
+			}
+		}
+	}
+
+	return playlists, nil
+}
+
+// GetPlaylist returns a playlist by ID if owned by userID, else ErrNotFound.
+func (s *Store) GetPlaylist(ctx context.Context, userID int64, playlistID string) (*Playlist, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var pl Playlist
+	row := s.db.QueryRowContext(ctx, `
+		SELECT p.id, p.user_id, p.name, p.created_at, p.updated_at, p.version, COUNT(pi.item_id)
+		FROM playlists p
+		LEFT JOIN playlist_items pi ON p.id = pi.playlist_id
+		WHERE p.id = ? AND p.user_id = ?
+		GROUP BY p.id
+	`, playlistID, userID)
+	if err := row.Scan(&pl.ID, &pl.UserID, &pl.Name, &pl.CreatedAt, &pl.UpdatedAt, &pl.Version, &pl.Count); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("get playlist: %w", err)
+	}
+
+	pl.Thumbnails = []string{}
+	thumbRows, err := s.db.QueryContext(ctx, `
+		SELECT t.thumb_url
+		FROM playlist_items pi
+		JOIN tracks t ON pi.video_id = t.video_id
+		WHERE pi.playlist_id = ? AND t.thumb_url IS NOT NULL AND t.thumb_url != ''
+		ORDER BY pi.position ASC
+		LIMIT 4
+	`, playlistID)
+	if err == nil {
+		defer thumbRows.Close()
+		for thumbRows.Next() {
+			var thumb string
+			if err := thumbRows.Scan(&thumb); err == nil {
+				pl.Thumbnails = append(pl.Thumbnails, thumb)
+			}
+		}
+	}
+
+	return &pl, nil
+}
+
+// GetPlaylistItems returns playlist items in position order with pagination and total count.
+func (s *Store) GetPlaylistItems(ctx context.Context, userID int64, playlistID string, limit, offset int) ([]PlaylistItem, int, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	// Verify ownership
+	var curVer int64
+	err := s.db.QueryRowContext(ctx, `SELECT version FROM playlists WHERE id = ? AND user_id = ?`, playlistID, userID).Scan(&curVer)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, 0, ErrNotFound
+		}
+		return nil, 0, fmt.Errorf("check playlist ownership: %w", err)
+	}
+
+	var total int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM playlist_items WHERE playlist_id = ?`, playlistID).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count playlist items: %w", err)
+	}
+
+	if limit <= 0 {
+		limit = 50
+	}
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT pi.item_id, pi.playlist_id, pi.position, pi.video_id, pi.added_at,
+		       t.title, t.artist, t.album, t.duration_s, t.thumb_url, t.updated_at
+		FROM playlist_items pi
+		JOIN tracks t ON pi.video_id = t.video_id
+		WHERE pi.playlist_id = ?
+		ORDER BY pi.position ASC
+		LIMIT ? OFFSET ?
+	`, playlistID, limit, offset)
+	if err != nil {
+		return nil, 0, fmt.Errorf("query playlist items: %w", err)
+	}
+	defer rows.Close()
+
+	var items []PlaylistItem
+	for rows.Next() {
+		var item PlaylistItem
+		var album, thumb sql.NullString
+		if err := rows.Scan(
+			&item.ItemID, &item.PlaylistID, &item.Position, &item.VideoID, &item.AddedAt,
+			&item.Track.Title, &item.Track.Artist, &album, &item.Track.Duration, &thumb, &item.Track.UpdatedAt,
+		); err != nil {
+			return nil, 0, fmt.Errorf("scan playlist item: %w", err)
+		}
+		item.Track.ID = item.VideoID
+		if album.Valid {
+			item.Track.Album = album.String
+		}
+		if thumb.Valid {
+			item.Track.Thumbnail = thumb.String
+		}
+		items = append(items, item)
+	}
+	return items, total, rows.Err()
+}
+
+// UpdatePlaylist updates playlist name with optimistic concurrency check.
+func (s *Store) UpdatePlaylist(ctx context.Context, userID int64, playlistID string, name string, expectedVersion *int64, now int64) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+
+	var curVer int64
+	if err := tx.QueryRowContext(ctx, `SELECT version FROM playlists WHERE id = ? AND user_id = ?`, playlistID, userID).Scan(&curVer); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, ErrNotFound
+		}
+		return 0, fmt.Errorf("get playlist version: %w", err)
+	}
+
+	if expectedVersion != nil && *expectedVersion != curVer {
+		return curVer, ErrVersionConflict
+	}
+
+	if now == 0 {
+		now = time.Now().UTC().Unix()
+	}
+	newVer := curVer + 1
+	_, err = tx.ExecContext(ctx, `
+		UPDATE playlists SET name = ?, version = ?, updated_at = ?
+		WHERE id = ? AND user_id = ?
+	`, name, newVer, now, playlistID, userID)
+	if err != nil {
+		return 0, fmt.Errorf("update playlist: %w", err)
+	}
+
+	if _, err := bumpPlaylistsVersionTx(ctx, tx, userID); err != nil {
+		return 0, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return newVer, nil
+}
+
+// DeletePlaylist deletes a playlist if owned by userID.
+func (s *Store) DeletePlaylist(ctx context.Context, userID int64, playlistID string, expectedVersion *int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	var curVer int64
+	if err := tx.QueryRowContext(ctx, `SELECT version FROM playlists WHERE id = ? AND user_id = ?`, playlistID, userID).Scan(&curVer); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		return fmt.Errorf("get playlist version: %w", err)
+	}
+
+	if expectedVersion != nil && *expectedVersion != curVer {
+		return ErrVersionConflict
+	}
+
+	_, err = tx.ExecContext(ctx, `DELETE FROM playlists WHERE id = ? AND user_id = ?`, playlistID, userID)
+	if err != nil {
+		return fmt.Errorf("delete playlist: %w", err)
+	}
+
+	if _, err := bumpPlaylistsVersionTx(ctx, tx, userID); err != nil {
+		return err
+	}
+
+	return tx.Commit()
+}
+
+// AddPlaylistItems adds tracks to a playlist at the specified position (or end if nil/past end).
+// Re-indexes positions densely 0..n-1, bumps version and playlists_version.
+func (s *Store) AddPlaylistItems(ctx context.Context, userID int64, playlistID string, tracks []Track, pos *int, expectedVersion *int64, now int64) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if len(tracks) == 0 {
+		return 0, errors.New("no tracks provided")
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+
+	var curVer int64
+	if err := tx.QueryRowContext(ctx, `SELECT version FROM playlists WHERE id = ? AND user_id = ?`, playlistID, userID).Scan(&curVer); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, ErrNotFound
+		}
+		return 0, fmt.Errorf("get playlist version: %w", err)
+	}
+
+	if expectedVersion != nil && *expectedVersion != curVer {
+		return curVer, ErrVersionConflict
+	}
+
+	var currentCount int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM playlist_items WHERE playlist_id = ?`, playlistID).Scan(&currentCount); err != nil {
+		return 0, fmt.Errorf("count playlist items: %w", err)
+	}
+
+	if currentCount+len(tracks) > 5000 {
+		return curVer, ErrLimitExceeded
+	}
+
+	if now == 0 {
+		now = time.Now().UTC().Unix()
+	}
+
+	// Upsert all tracks
+	for _, t := range tracks {
+		if err := upsertTrackTx(ctx, tx, t, now); err != nil {
+			return 0, err
+		}
+	}
+
+	// Fetch existing items ordered by position ASC
+	rows, err := tx.QueryContext(ctx, `
+		SELECT item_id FROM playlist_items WHERE playlist_id = ? ORDER BY position ASC
+	`, playlistID)
+	if err != nil {
+		return 0, fmt.Errorf("query existing playlist items: %w", err)
+	}
+	var existingItemIDs []string
+	for rows.Next() {
+		var iid string
+		if err := rows.Scan(&iid); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		existingItemIDs = append(existingItemIDs, iid)
+	}
+	rows.Close()
+
+	// Determine insertion point
+	insertIdx := len(existingItemIDs)
+	if pos != nil {
+		if *pos < 0 {
+			insertIdx = 0
+		} else if *pos < len(existingItemIDs) {
+			insertIdx = *pos
+		}
+	}
+
+	// Generate new items
+	type newItem struct {
+		id      string
+		videoID string
+		addedAt int64
+	}
+	newItems := make([]newItem, len(tracks))
+	for i, t := range tracks {
+		newItems[i] = newItem{
+			id:      randomURLSafeID(16),
+			videoID: t.ID,
+			addedAt: now,
+		}
+	}
+
+	// Insert new items into database with temporary positions
+	for _, it := range newItems {
+		_, err := tx.ExecContext(ctx, `
+			INSERT INTO playlist_items (item_id, playlist_id, position, video_id, added_at)
+			VALUES (?, ?, -1, ?, ?)
+		`, it.id, playlistID, it.videoID, it.addedAt)
+		if err != nil {
+			return 0, fmt.Errorf("insert playlist item: %w", err)
+		}
+	}
+
+	// Combine in final order
+	var finalItemIDs []string
+	finalItemIDs = append(finalItemIDs, existingItemIDs[:insertIdx]...)
+	for _, it := range newItems {
+		finalItemIDs = append(finalItemIDs, it.id)
+	}
+	finalItemIDs = append(finalItemIDs, existingItemIDs[insertIdx:]...)
+
+	// Re-index dense 0..n-1
+	for idx, iid := range finalItemIDs {
+		_, err := tx.ExecContext(ctx, `
+			UPDATE playlist_items SET position = ? WHERE item_id = ?
+		`, idx, iid)
+		if err != nil {
+			return 0, fmt.Errorf("reindex item position: %w", err)
+		}
+	}
+
+	newVer := curVer + 1
+	_, err = tx.ExecContext(ctx, `
+		UPDATE playlists SET version = ?, updated_at = ? WHERE id = ?
+	`, newVer, now, playlistID)
+	if err != nil {
+		return 0, fmt.Errorf("bump playlist version: %w", err)
+	}
+
+	if _, err := bumpPlaylistsVersionTx(ctx, tx, userID); err != nil {
+		return 0, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return newVer, nil
+}
+
+// DeletePlaylistItem removes an item from a playlist and densely re-indexes remaining items.
+func (s *Store) DeletePlaylistItem(ctx context.Context, userID int64, playlistID, itemID string, expectedVersion *int64, now int64) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+
+	var curVer int64
+	if err := tx.QueryRowContext(ctx, `SELECT version FROM playlists WHERE id = ? AND user_id = ?`, playlistID, userID).Scan(&curVer); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, ErrNotFound
+		}
+		return 0, fmt.Errorf("get playlist version: %w", err)
+	}
+
+	if expectedVersion != nil && *expectedVersion != curVer {
+		return curVer, ErrVersionConflict
+	}
+
+	res, err := tx.ExecContext(ctx, `DELETE FROM playlist_items WHERE playlist_id = ? AND item_id = ?`, playlistID, itemID)
+	if err != nil {
+		return 0, fmt.Errorf("delete playlist item: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return 0, ErrNotFound
+	}
+
+	// Re-index remaining items dense 0..n-1
+	rows, err := tx.QueryContext(ctx, `
+		SELECT item_id FROM playlist_items WHERE playlist_id = ? ORDER BY position ASC
+	`, playlistID)
+	if err != nil {
+		return 0, fmt.Errorf("query remaining items: %w", err)
+	}
+	var remaining []string
+	for rows.Next() {
+		var iid string
+		if err := rows.Scan(&iid); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		remaining = append(remaining, iid)
+	}
+	rows.Close()
+
+	for idx, iid := range remaining {
+		_, err := tx.ExecContext(ctx, `UPDATE playlist_items SET position = ? WHERE item_id = ?`, idx, iid)
+		if err != nil {
+			return 0, fmt.Errorf("reindex item: %w", err)
+		}
+	}
+
+	if now == 0 {
+		now = time.Now().UTC().Unix()
+	}
+	newVer := curVer + 1
+	_, err = tx.ExecContext(ctx, `UPDATE playlists SET version = ?, updated_at = ? WHERE id = ?`, newVer, now, playlistID)
+	if err != nil {
+		return 0, fmt.Errorf("update playlist version: %w", err)
+	}
+
+	if _, err := bumpPlaylistsVersionTx(ctx, tx, userID); err != nil {
+		return 0, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return newVer, nil
+}
+
+// MovePlaylistItem reorders an item to toPos and densely re-indexes.
+func (s *Store) MovePlaylistItem(ctx context.Context, userID int64, playlistID, itemID string, toPos int, expectedVersion *int64, now int64) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+
+	var curVer int64
+	if err := tx.QueryRowContext(ctx, `SELECT version FROM playlists WHERE id = ? AND user_id = ?`, playlistID, userID).Scan(&curVer); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, ErrNotFound
+		}
+		return 0, fmt.Errorf("get playlist version: %w", err)
+	}
+
+	if expectedVersion != nil && *expectedVersion != curVer {
+		return curVer, ErrVersionConflict
+	}
+
+	rows, err := tx.QueryContext(ctx, `
+		SELECT item_id FROM playlist_items WHERE playlist_id = ? ORDER BY position ASC
+	`, playlistID)
+	if err != nil {
+		return 0, fmt.Errorf("query items: %w", err)
+	}
+	var items []string
+	foundIdx := -1
+	for rows.Next() {
+		var iid string
+		if err := rows.Scan(&iid); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		if iid == itemID {
+			foundIdx = len(items)
+		}
+		items = append(items, iid)
+	}
+	rows.Close()
+
+	if foundIdx == -1 {
+		return 0, ErrNotFound
+	}
+
+	// Remove item from slice and insert at toPos
+	items = append(items[:foundIdx], items[foundIdx+1:]...)
+	if toPos < 0 {
+		toPos = 0
+	} else if toPos > len(items) {
+		toPos = len(items)
+	}
+	items = append(items[:toPos], append([]string{itemID}, items[toPos:]...)...)
+
+	// Re-index all
+	for idx, iid := range items {
+		_, err := tx.ExecContext(ctx, `UPDATE playlist_items SET position = ? WHERE item_id = ?`, idx, iid)
+		if err != nil {
+			return 0, fmt.Errorf("reindex item: %w", err)
+		}
+	}
+
+	if now == 0 {
+		now = time.Now().UTC().Unix()
+	}
+	newVer := curVer + 1
+	_, err = tx.ExecContext(ctx, `UPDATE playlists SET version = ?, updated_at = ? WHERE id = ?`, newVer, now, playlistID)
+	if err != nil {
+		return 0, fmt.Errorf("update playlist version: %w", err)
+	}
+
+	if _, err := bumpPlaylistsVersionTx(ctx, tx, userID); err != nil {
+		return 0, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return newVer, nil
+}
+
+// AddHistory records played tracks. Duplicates of (user_id, video_id, played_at) are ignored.
+// Returns the count of accepted (inserted) entries. Bumps history_version if accepted > 0.
+func (s *Store) AddHistory(ctx context.Context, userID int64, entries []HistoryEntry) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if len(entries) == 0 {
+		return 0, nil
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+
+	now := time.Now().UTC().Unix()
+	accepted := 0
+	for _, e := range entries {
+		if err := upsertTrackTx(ctx, tx, e.Track, now); err != nil {
+			return 0, err
+		}
+
+		var devID any
+		if e.DeviceID != nil && *e.DeviceID != "" {
+			devID = *e.DeviceID
+		}
+
+		res, err := tx.ExecContext(ctx, `
+			INSERT OR IGNORE INTO history (user_id, video_id, played_at, played_ms, device_id, source)
+			VALUES (?, ?, ?, ?, ?, ?)
+		`, userID, e.Track.ID, e.PlayedAt, e.PlayedMs, devID, e.Source)
+		if err != nil {
+			return 0, fmt.Errorf("insert history entry: %w", err)
+		}
+		n, _ := res.RowsAffected()
+		if n > 0 {
+			accepted++
+		}
+	}
+
+	if accepted > 0 {
+		if _, err := bumpHistoryVersionTx(ctx, tx, userID); err != nil {
+			return 0, err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return accepted, nil
+}
+
+// GetHistory returns playback history newest first with pagination.
+func (s *Store) GetHistory(ctx context.Context, userID int64, limit, offset int) ([]HistoryEntry, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if limit <= 0 {
+		limit = 50
+	}
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT h.id, h.user_id, h.video_id, h.played_at, h.played_ms, h.device_id, h.source,
+		       t.title, t.artist, t.album, t.duration_s, t.thumb_url, t.updated_at
+		FROM history h
+		JOIN tracks t ON h.video_id = t.video_id
+		WHERE h.user_id = ?
+		ORDER BY h.played_at DESC, h.id DESC
+		LIMIT ? OFFSET ?
+	`, userID, limit, offset)
+	if err != nil {
+		return nil, fmt.Errorf("query history: %w", err)
+	}
+	defer rows.Close()
+
+	var out []HistoryEntry
+	for rows.Next() {
+		var e HistoryEntry
+		var devID, album, thumb sql.NullString
+		if err := rows.Scan(
+			&e.ID, &e.UserID, &e.VideoID, &e.PlayedAt, &e.PlayedMs, &devID, &e.Source,
+			&e.Track.Title, &e.Track.Artist, &album, &e.Track.Duration, &thumb, &e.Track.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan history entry: %w", err)
+		}
+		e.Track.ID = e.VideoID
+		if devID.Valid {
+			str := devID.String
+			e.DeviceID = &str
+		}
+		if album.Valid {
+			e.Track.Album = album.String
+		}
+		if thumb.Valid {
+			e.Track.Thumbnail = thumb.String
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// ClearHistory deletes all history rows for a user and bumps history_version.
+func (s *Store) ClearHistory(ctx context.Context, userID int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	_, err = tx.ExecContext(ctx, `DELETE FROM history WHERE user_id = ?`, userID)
+	if err != nil {
+		return fmt.Errorf("clear history: %w", err)
+	}
+
+	if _, err := bumpHistoryVersionTx(ctx, tx, userID); err != nil {
+		return err
+	}
+
+	return tx.Commit()
+}
+
+// DeleteHistoryItem deletes one history entry for a user and bumps history_version.
+func (s *Store) DeleteHistoryItem(ctx context.Context, userID int64, historyID int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	res, err := tx.ExecContext(ctx, `DELETE FROM history WHERE user_id = ? AND id = ?`, userID, historyID)
+	if err != nil {
+		return fmt.Errorf("delete history item: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+
+	if _, err := bumpHistoryVersionTx(ctx, tx, userID); err != nil {
+		return err
+	}
+
+	return tx.Commit()
+}
+
+// PruneHistory prunes history keeping the newest keepPerUser rows per user.
+func (s *Store) PruneHistory(ctx context.Context, keepPerUser int) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	res, err := s.db.ExecContext(ctx, `
+		DELETE FROM history WHERE id IN (
+			SELECT id FROM (
+				SELECT id, ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY played_at DESC, id DESC) as rn
+				FROM history
+			) WHERE rn > ?
+		)
+	`, keepPerUser)
+	if err != nil {
+		return 0, fmt.Errorf("prune history: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("prune history rows affected: %w", err)
 	}
 	return n, nil
 }

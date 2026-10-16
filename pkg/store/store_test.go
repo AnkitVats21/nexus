@@ -1013,3 +1013,356 @@ func TestPruneRefreshTokens(t *testing.T) {
 		t.Fatalf("expected rt4 UsedAt to be preserved")
 	}
 }
+
+func TestMigration004_Library(t *testing.T) {
+	s, cleanup := newTestStore(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	// 1. Create two test users
+	_ = s.CreateUser(ctx, &User{Username: "lib_user1", DisplayName: "User One", Role: "member", PassHash: "h"})
+	u1, err := s.GetUserByUsername(ctx, "lib_user1")
+	if err != nil {
+		t.Fatalf("get user1: %v", err)
+	}
+	_ = s.CreateUser(ctx, &User{Username: "lib_user2", DisplayName: "User Two", Role: "member", PassHash: "h"})
+	u2, err := s.GetUserByUsername(ctx, "lib_user2")
+	if err != nil {
+		t.Fatalf("get user2: %v", err)
+	}
+
+	// 2. Initial versions should be 0
+	v0, err := s.GetLibraryVersions(ctx, u1.ID)
+	if err != nil {
+		t.Fatalf("get v0: %v", err)
+	}
+	if v0.LikesVersion != 0 || v0.PlaylistsVersion != 0 || v0.HistoryVersion != 0 {
+		t.Fatalf("expected all 0 versions, got %+v", v0)
+	}
+
+	// 3. Test Likes
+	t1 := Track{
+		ID:        "vid_11char1",
+		Title:     "Song One",
+		Artist:    "Artist A",
+		Album:     "Album A",
+		Duration:  180,
+		Thumbnail: "https://example.com/thumb1.jpg",
+	}
+	t2 := Track{
+		ID:        "vid_11char2",
+		Title:     "Song Two",
+		Artist:    "Artist B",
+		Duration:  210,
+		Thumbnail: "https://example.com/thumb2.jpg",
+	}
+
+	likedAt1 := int64(1000)
+	if err := s.PutLike(ctx, u1.ID, t1, likedAt1); err != nil {
+		t.Fatalf("PutLike t1: %v", err)
+	}
+	v1, _ := s.GetLibraryVersions(ctx, u1.ID)
+	if v1.LikesVersion != 1 {
+		t.Fatalf("expected likes_version 1, got %d", v1.LikesVersion)
+	}
+
+	// Idempotency: re-put t1 with newer timestamp must preserve original liked_at
+	t1Updated := t1
+	t1Updated.Title = "Song One (Remastered)"
+	if err := s.PutLike(ctx, u1.ID, t1Updated, 2000); err != nil {
+		t.Fatalf("re-PutLike t1: %v", err)
+	}
+	v2, _ := s.GetLibraryVersions(ctx, u1.ID)
+	if v2.LikesVersion != 2 {
+		t.Fatalf("expected likes_version 2, got %d", v2.LikesVersion)
+	}
+
+	// Put t2
+	if err := s.PutLike(ctx, u1.ID, t2, 3000); err != nil {
+		t.Fatalf("PutLike t2: %v", err)
+	}
+
+	// GetLikes: newest first -> t2 (3000), then t1 (1000)
+	likes, err := s.GetLikes(ctx, u1.ID, 10, 0)
+	if err != nil {
+		t.Fatalf("GetLikes: %v", err)
+	}
+	if len(likes) != 2 {
+		t.Fatalf("expected 2 likes, got %d", len(likes))
+	}
+	if likes[0].VideoID != t2.ID || likes[0].LikedAt != 3000 {
+		t.Fatalf("expected first like to be t2 at 3000, got %+v", likes[0])
+	}
+	if likes[1].VideoID != t1.ID || likes[1].LikedAt != 1000 || likes[1].Track.Title != "Song One (Remastered)" {
+		t.Fatalf("expected second like to be t1 at 1000 with updated title, got %+v", likes[1])
+	}
+
+	// Compact IDs
+	ids, err := s.GetLikedIDs(ctx, u1.ID)
+	if err != nil {
+		t.Fatalf("GetLikedIDs: %v", err)
+	}
+	if len(ids) != 2 || ids[0] != t2.ID || ids[1] != t1.ID {
+		t.Fatalf("unexpected liked IDs: %v", ids)
+	}
+
+	// Delete like
+	if err := s.DeleteLike(ctx, u1.ID, t1.ID); err != nil {
+		t.Fatalf("DeleteLike: %v", err)
+	}
+	v3, _ := s.GetLibraryVersions(ctx, u1.ID)
+	if v3.LikesVersion != 4 {
+		t.Fatalf("expected likes_version 4, got %d", v3.LikesVersion)
+	}
+	likesAfter, _ := s.GetLikes(ctx, u1.ID, 10, 0)
+	if len(likesAfter) != 1 || likesAfter[0].VideoID != t2.ID {
+		t.Fatalf("expected only t2 in likes, got %+v", likesAfter)
+	}
+
+	// User 2 sees no likes
+	u2Likes, _ := s.GetLikes(ctx, u2.ID, 10, 0)
+	if len(u2Likes) != 0 {
+		t.Fatalf("expected 0 likes for user2, got %d", len(u2Likes))
+	}
+
+	// 4. Test Playlists & Dense Items
+	pl := &Playlist{
+		UserID: u1.ID,
+		Name:   "Favorites",
+	}
+	if err := s.CreatePlaylist(ctx, pl); err != nil {
+		t.Fatalf("CreatePlaylist: %v", err)
+	}
+	if pl.ID == "" || pl.Version != 1 {
+		t.Fatalf("unexpected created playlist: %+v", pl)
+	}
+	vPl1, _ := s.GetLibraryVersions(ctx, u1.ID)
+	if vPl1.PlaylistsVersion != 1 {
+		t.Fatalf("expected playlists_version 1, got %d", vPl1.PlaylistsVersion)
+	}
+
+	// Update playlist name
+	expV := int64(1)
+	newV, err := s.UpdatePlaylist(ctx, u1.ID, pl.ID, "Favorites 2026", &expV, 0)
+	if err != nil {
+		t.Fatalf("UpdatePlaylist: %v", err)
+	}
+	if newV != 2 {
+		t.Fatalf("expected new version 2, got %d", newV)
+	}
+
+	// Version conflict check
+	wrongV := int64(1)
+	_, err = s.UpdatePlaylist(ctx, u1.ID, pl.ID, "Will Fail", &wrongV, 0)
+	if err != ErrVersionConflict {
+		t.Fatalf("expected ErrVersionConflict, got %v", err)
+	}
+
+	// Add playlist items [t1, t2]
+	t3 := Track{ID: "vid_11char3", Title: "Song Three", Artist: "Artist C", Duration: 300, Thumbnail: "https://example.com/thumb3.jpg"}
+	t4 := Track{ID: "vid_11char4", Title: "Song Four", Artist: "Artist D", Duration: 240, Thumbnail: "https://example.com/thumb4.jpg"}
+
+	curV := int64(2)
+	newV, err = s.AddPlaylistItems(ctx, u1.ID, pl.ID, []Track{t1, t2, t3}, nil, &curV, 0)
+	if err != nil {
+		t.Fatalf("AddPlaylistItems: %v", err)
+	}
+	if newV != 3 {
+		t.Fatalf("expected version 3 after add, got %d", newV)
+	}
+
+	// Verify items: positions 0, 1, 2
+	items, total, err := s.GetPlaylistItems(ctx, u1.ID, pl.ID, 10, 0)
+	if err != nil {
+		t.Fatalf("GetPlaylistItems: %v", err)
+	}
+	if total != 3 || len(items) != 3 {
+		t.Fatalf("expected 3 items, got %d", total)
+	}
+	for i, it := range items {
+		if it.Position != i {
+			t.Fatalf("item %d has position %d, expected %d", i, it.Position, i)
+		}
+	}
+
+	// Insert t4 at position 1: final positions should be t1 (0), t4 (1), t2 (2), t3 (3)
+	curV = 3
+	pos1 := 1
+	newV, err = s.AddPlaylistItems(ctx, u1.ID, pl.ID, []Track{t4}, &pos1, &curV, 0)
+	if err != nil {
+		t.Fatalf("AddPlaylistItems at pos 1: %v", err)
+	}
+	if newV != 4 {
+		t.Fatalf("expected version 4, got %d", newV)
+	}
+	items, total, _ = s.GetPlaylistItems(ctx, u1.ID, pl.ID, 10, 0)
+	if total != 4 {
+		t.Fatalf("expected 4 items, got %d", total)
+	}
+	if items[0].VideoID != t1.ID || items[1].VideoID != t4.ID || items[2].VideoID != t2.ID || items[3].VideoID != t3.ID {
+		t.Fatalf("unexpected items order: %+v", items)
+	}
+	for i, it := range items {
+		if it.Position != i {
+			t.Fatalf("item %d not dense: position %d", i, it.Position)
+		}
+	}
+
+	// Move item: move t3 (index 3) to index 0. Order: t3 (0), t1 (1), t4 (2), t2 (3)
+	curV = 4
+	t3ItemID := items[3].ItemID
+	newV, err = s.MovePlaylistItem(ctx, u1.ID, pl.ID, t3ItemID, 0, &curV, 0)
+	if err != nil {
+		t.Fatalf("MovePlaylistItem: %v", err)
+	}
+	if newV != 5 {
+		t.Fatalf("expected version 5 after move, got %d", newV)
+	}
+	items, _, _ = s.GetPlaylistItems(ctx, u1.ID, pl.ID, 10, 0)
+	if items[0].VideoID != t3.ID || items[1].VideoID != t1.ID || items[2].VideoID != t4.ID || items[3].VideoID != t2.ID {
+		t.Fatalf("unexpected items order after move: %+v", items)
+	}
+	for i, it := range items {
+		if it.Position != i {
+			t.Fatalf("item %d not dense after move: position %d", i, it.Position)
+		}
+	}
+
+	// Delete item: delete t4 (index 2). Order: t3 (0), t1 (1), t2 (2)
+	curV = 5
+	t4ItemID := items[2].ItemID
+	newV, err = s.DeletePlaylistItem(ctx, u1.ID, pl.ID, t4ItemID, &curV, 0)
+	if err != nil {
+		t.Fatalf("DeletePlaylistItem: %v", err)
+	}
+	if newV != 6 {
+		t.Fatalf("expected version 6 after delete, got %d", newV)
+	}
+	items, total, _ = s.GetPlaylistItems(ctx, u1.ID, pl.ID, 10, 0)
+	if total != 3 {
+		t.Fatalf("expected 3 items, got %d", total)
+	}
+	if items[0].VideoID != t3.ID || items[1].VideoID != t1.ID || items[2].VideoID != t2.ID {
+		t.Fatalf("unexpected items order after delete: %+v", items)
+	}
+	for i, it := range items {
+		if it.Position != i {
+			t.Fatalf("item %d not dense after delete: position %d", i, it.Position)
+		}
+	}
+
+	// Verify GetPlaylists returns count 3 and first 3 thumbnails
+	plList, err := s.GetPlaylists(ctx, u1.ID)
+	if err != nil {
+		t.Fatalf("GetPlaylists: %v", err)
+	}
+	if len(plList) != 1 || plList[0].Count != 3 || len(plList[0].Thumbnails) != 3 {
+		t.Fatalf("unexpected playlist in list: %+v", plList)
+	}
+
+	// User 2 cannot access user 1's playlist
+	if _, err := s.GetPlaylist(ctx, u2.ID, pl.ID); err != ErrNotFound {
+		t.Fatalf("expected ErrNotFound accessing u1 playlist as u2, got %v", err)
+	}
+
+	// 5. Test History
+	hEntries := []HistoryEntry{
+		{Track: t1, PlayedAt: 10000, PlayedMs: 180000, Source: "app"},
+		{Track: t2, PlayedAt: 20000, PlayedMs: 210000, Source: "board"},
+		{Track: t1, PlayedAt: 10000, PlayedMs: 180000, Source: "app"}, // duplicate!
+	}
+	accepted, err := s.AddHistory(ctx, u1.ID, hEntries)
+	if err != nil {
+		t.Fatalf("AddHistory: %v", err)
+	}
+	if accepted != 2 {
+		t.Fatalf("expected accepted=2, got %d", accepted)
+	}
+	vHist1, _ := s.GetLibraryVersions(ctx, u1.ID)
+	if vHist1.HistoryVersion != 1 {
+		t.Fatalf("expected history_version 1, got %d", vHist1.HistoryVersion)
+	}
+
+	// Retrying identical upload adds 0 new rows and does not bump version
+	accepted2, err := s.AddHistory(ctx, u1.ID, hEntries)
+	if err != nil {
+		t.Fatalf("AddHistory duplicate: %v", err)
+	}
+	if accepted2 != 0 {
+		t.Fatalf("expected accepted=0 on duplicate, got %d", accepted2)
+	}
+	vHist2, _ := s.GetLibraryVersions(ctx, u1.ID)
+	if vHist2.HistoryVersion != 1 {
+		t.Fatalf("history_version bumped on duplicate: %d", vHist2.HistoryVersion)
+	}
+
+	// GetHistory: newest first -> t2 (20000), then t1 (10000)
+	hList, err := s.GetHistory(ctx, u1.ID, 10, 0)
+	if err != nil {
+		t.Fatalf("GetHistory: %v", err)
+	}
+	if len(hList) != 2 {
+		t.Fatalf("expected 2 history entries, got %d", len(hList))
+	}
+	if hList[0].VideoID != t2.ID || hList[0].PlayedAt != 20000 || hList[0].Source != "board" {
+		t.Fatalf("unexpected first history item: %+v", hList[0])
+	}
+	if hList[1].VideoID != t1.ID || hList[1].PlayedAt != 10000 || hList[1].Source != "app" {
+		t.Fatalf("unexpected second history item: %+v", hList[1])
+	}
+
+	// Prune history
+	for i := 0; i < 15; i++ {
+		_, _ = s.AddHistory(ctx, u1.ID, []HistoryEntry{
+			{Track: t1, PlayedAt: int64(30000 + i*1000), PlayedMs: 50000, Source: "app"},
+		})
+	}
+	hBeforePrune, _ := s.GetHistory(ctx, u1.ID, 50, 0)
+	if len(hBeforePrune) != 17 {
+		t.Fatalf("expected 17 history rows before prune, got %d", len(hBeforePrune))
+	}
+	prunedN, err := s.PruneHistory(ctx, 10)
+	if err != nil {
+		t.Fatalf("PruneHistory: %v", err)
+	}
+	if prunedN != 7 {
+		t.Fatalf("expected 7 rows pruned, got %d", prunedN)
+	}
+	hAfterPrune, _ := s.GetHistory(ctx, u1.ID, 50, 0)
+	if len(hAfterPrune) != 10 {
+		t.Fatalf("expected 10 history rows after prune, got %d", len(hAfterPrune))
+	}
+
+	// 6. Test Cascade on User Deletion
+	// Put some data for user2
+	_ = s.PutLike(ctx, u2.ID, t1, 5000)
+	pl2 := &Playlist{UserID: u2.ID, Name: "User2 Playlist"}
+	_ = s.CreatePlaylist(ctx, pl2)
+	curV2 := int64(1)
+	_, _ = s.AddPlaylistItems(ctx, u2.ID, pl2.ID, []Track{t2}, nil, &curV2, 0)
+	_, _ = s.AddHistory(ctx, u2.ID, []HistoryEntry{{Track: t1, PlayedAt: 99999, PlayedMs: 1000, Source: "app"}})
+
+	// Delete user2
+	if err := s.DeleteUser(ctx, u2.ID); err != nil {
+		t.Fatalf("DeleteUser u2: %v", err)
+	}
+
+	// Verify all user2 library data was cascaded away
+	u2LikesAfter, _ := s.GetLikes(ctx, u2.ID, 10, 0)
+	if len(u2LikesAfter) != 0 {
+		t.Fatalf("expected 0 likes after cascade, got %d", len(u2LikesAfter))
+	}
+	u2PlaylistsAfter, _ := s.GetPlaylists(ctx, u2.ID)
+	if len(u2PlaylistsAfter) != 0 {
+		t.Fatalf("expected 0 playlists after cascade, got %d", len(u2PlaylistsAfter))
+	}
+	u2HistAfter, _ := s.GetHistory(ctx, u2.ID, 10, 0)
+	if len(u2HistAfter) != 0 {
+		t.Fatalf("expected 0 history after cascade, got %d", len(u2HistAfter))
+	}
+	vU2After, _ := s.GetLibraryVersions(ctx, u2.ID)
+	if vU2After.LikesVersion != 0 || vU2After.PlaylistsVersion != 0 || vU2After.HistoryVersion != 0 {
+		t.Fatalf("expected 0 versions after cascade, got %+v", vU2After)
+	}
+}

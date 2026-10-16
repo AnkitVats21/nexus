@@ -3,8 +3,10 @@ package store
 import "errors"
 
 var (
-	ErrNotFound = errors.New("not found")
-	ErrConflict = errors.New("conflict: record already exists")
+	ErrNotFound        = errors.New("not found")
+	ErrConflict        = errors.New("conflict: record already exists")
+	ErrVersionConflict = errors.New("version conflict")
+	ErrLimitExceeded   = errors.New("limit exceeded")
 )
 
 // User represents an authenticated hub user.
@@ -71,4 +73,65 @@ type RefreshToken struct {
 	UsedAt    *int64   `json:"used_at,omitempty"`
 	UserAgent string   `json:"user_agent,omitempty"`
 	IP        string   `json:"ip,omitempty"`
+}
+
+// Track represents shared track metadata in the catalog/library.
+type Track struct {
+	ID        string `json:"id"`
+	Title     string `json:"title"`
+	Artist    string `json:"artist"`
+	Album     string `json:"album,omitempty"`
+	Duration  int    `json:"duration"` // seconds
+	Thumbnail string `json:"thumbnail,omitempty"`
+	UpdatedAt int64  `json:"updated_at,omitempty"`
+}
+
+// Like represents a user's liked track.
+type Like struct {
+	UserID  int64  `json:"user_id"`
+	VideoID string `json:"video_id"`
+	LikedAt int64  `json:"liked_at"`
+	Track   Track  `json:"track"`
+}
+
+// Playlist represents a user-created playlist.
+type Playlist struct {
+	ID         string   `json:"id"`
+	UserID     int64    `json:"user_id"`
+	Name       string   `json:"name"`
+	CreatedAt  int64    `json:"created_at"`
+	UpdatedAt  int64    `json:"updated_at"`
+	Version    int64    `json:"version"`
+	Count      int      `json:"count"`
+	Thumbnails []string `json:"thumbnails"`
+}
+
+// PlaylistItem represents an entry in a playlist.
+type PlaylistItem struct {
+	ItemID     string `json:"item_id"`
+	PlaylistID string `json:"playlist_id"`
+	Position   int    `json:"position"`
+	VideoID    string `json:"video_id"`
+	AddedAt    int64  `json:"added_at"`
+	Track      Track  `json:"track"`
+}
+
+// HistoryEntry represents a playback history entry.
+type HistoryEntry struct {
+	ID       int64   `json:"id"`
+	UserID   int64   `json:"user_id"`
+	VideoID  string  `json:"video_id"`
+	PlayedAt int64   `json:"played_at"`
+	PlayedMs int64   `json:"played_ms"`
+	DeviceID *string `json:"device_id,omitempty"`
+	Source   string  `json:"source"` // 'app', 'board', 'dashboard'
+	Track    Track   `json:"track"`
+}
+
+// LibraryVersions holds sync version counters for a user's library sections.
+type LibraryVersions struct {
+	UserID           int64 `json:"user_id"`
+	LikesVersion     int64 `json:"likes"`
+	PlaylistsVersion int64 `json:"playlists"`
+	HistoryVersion   int64 `json:"history"`
 }
