@@ -528,3 +528,133 @@ func TestClaimPairingCode(t *testing.T) {
 		t.Fatalf("expected ErrNotFound for expired code, got %v", err)
 	}
 }
+
+func TestPushTokensLifecycleAndCascade(t *testing.T) {
+	s, cleanup := newTestStore(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	// 1. Get non-existent token
+	if _, err := s.GetPushToken(ctx, "non-existent-device"); err != ErrNotFound {
+		t.Fatalf("expected ErrNotFound for non-existent device, got %v", err)
+	}
+
+	// Setup user & device
+	u := &User{
+		Username:    "dave",
+		DisplayName: "Dave",
+		Role:        "member",
+		PassHash:    "dummy_hash",
+	}
+	if err := s.CreateUser(ctx, u); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+
+	devID := "dev-phone-123"
+	tokHash := sha256.Sum256([]byte("dummy-device-token"))
+	dev := &Device{
+		ID:        devID,
+		OwnerID:   u.ID,
+		Name:      "Dave's Phone",
+		Kind:      "android",
+		TokenHash: tokHash,
+	}
+	if err := s.UpsertDevice(ctx, dev); err != nil {
+		t.Fatalf("UpsertDevice: %v", err)
+	}
+
+	// 2. UpsertPushToken
+	pt := &PushToken{
+		DeviceID: devID,
+		Provider: "fcm",
+		Token:    "fcm-reg-token-abc",
+	}
+	if err := s.UpsertPushToken(ctx, pt); err != nil {
+		t.Fatalf("UpsertPushToken: %v", err)
+	}
+
+	// 3. GetPushToken
+	got, err := s.GetPushToken(ctx, devID)
+	if err != nil {
+		t.Fatalf("GetPushToken: %v", err)
+	}
+	if got.DeviceID != devID || got.Provider != "fcm" || got.Token != "fcm-reg-token-abc" {
+		t.Fatalf("unexpected push token: %+v", got)
+	}
+	if got.FailCount != 0 || got.LastOKAt != 0 || got.UpdatedAt == 0 {
+		t.Fatalf("unexpected push token fields: %+v", got)
+	}
+
+	// 4. MarkPushOK
+	if err := s.MarkPushOK(ctx, devID); err != nil {
+		t.Fatalf("MarkPushOK: %v", err)
+	}
+	gotOK, err := s.GetPushToken(ctx, devID)
+	if err != nil {
+		t.Fatalf("GetPushToken after MarkPushOK: %v", err)
+	}
+	if gotOK.LastOKAt == 0 {
+		t.Fatalf("expected LastOKAt to be updated, got 0")
+	}
+
+	// 5. MarkPushFail
+	if err := s.MarkPushFail(ctx, devID); err != nil {
+		t.Fatalf("MarkPushFail: %v", err)
+	}
+	if err := s.MarkPushFail(ctx, devID); err != nil {
+		t.Fatalf("MarkPushFail second: %v", err)
+	}
+	gotFail, err := s.GetPushToken(ctx, devID)
+	if err != nil {
+		t.Fatalf("GetPushToken after MarkPushFail: %v", err)
+	}
+	if gotFail.FailCount != 2 {
+		t.Fatalf("expected FailCount=2, got %d", gotFail.FailCount)
+	}
+
+	// 6. Upsert new token resets fail_count
+	pt2 := &PushToken{
+		DeviceID: devID,
+		Provider: "fcm",
+		Token:    "fcm-reg-token-xyz",
+	}
+	if err := s.UpsertPushToken(ctx, pt2); err != nil {
+		t.Fatalf("UpsertPushToken pt2: %v", err)
+	}
+	got2, err := s.GetPushToken(ctx, devID)
+	if err != nil {
+		t.Fatalf("GetPushToken pt2: %v", err)
+	}
+	if got2.Token != "fcm-reg-token-xyz" || got2.FailCount != 0 {
+		t.Fatalf("expected token updated and FailCount reset to 0, got %+v", got2)
+	}
+
+	// 7. DeletePushToken
+	if err := s.DeletePushToken(ctx, devID); err != nil {
+		t.Fatalf("DeletePushToken: %v", err)
+	}
+	if _, err := s.GetPushToken(ctx, devID); err != ErrNotFound {
+		t.Fatalf("expected ErrNotFound after DeletePushToken, got %v", err)
+	}
+	if err := s.DeletePushToken(ctx, devID); err != ErrNotFound {
+		t.Fatalf("expected ErrNotFound on duplicate delete, got %v", err)
+	}
+
+	// 8. Cascade on device delete
+	if err := s.UpsertPushToken(ctx, pt2); err != nil {
+		t.Fatalf("UpsertPushToken before cascade test: %v", err)
+	}
+	// Verify token is present
+	if _, err := s.GetPushToken(ctx, devID); err != nil {
+		t.Fatalf("GetPushToken before device delete: %v", err)
+	}
+	// Delete device
+	if err := s.DeleteDevice(ctx, devID); err != nil {
+		t.Fatalf("DeleteDevice: %v", err)
+	}
+	// Token must have been deleted via CASCADE
+	if _, err := s.GetPushToken(ctx, devID); err != ErrNotFound {
+		t.Fatalf("expected ErrNotFound for push token after device delete (CASCADE), got %v", err)
+	}
+}

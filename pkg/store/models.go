@@ -48,3 +48,13 @@ type PairingCode struct {
 	ExpiresAt int64    `json:"expires_at"`
 	CreatedAt int64    `json:"created_at"`
 }
+
+// PushToken represents an FCM push registration token for a device.
+type PushToken struct {
+	DeviceID  string `json:"device_id"`
+	Provider  string `json:"provider"`
+	Token     string `json:"-"`
+	UpdatedAt int64  `json:"updated_at"`
+	LastOKAt  int64  `json:"last_ok_at,omitempty"`
+	FailCount int    `json:"fail_count"`
+}

@@ -925,3 +925,128 @@ func (s *Store) GetFirstAdmin(ctx context.Context) (*User, error) {
 	u.MustChange = (mustChange != 0)
 	return &u, nil
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Push Tokens
+// ─────────────────────────────────────────────────────────────────────────────
+
+// UpsertPushToken stores or updates an FCM push token for a device.
+func (s *Store) UpsertPushToken(ctx context.Context, pt *PushToken) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := time.Now().UTC().Unix()
+	if pt.UpdatedAt == 0 {
+		pt.UpdatedAt = now
+	}
+
+	var lastOK any = nil
+	if pt.LastOKAt > 0 {
+		lastOK = pt.LastOKAt
+	}
+
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO push_tokens (device_id, provider, token, updated_at, last_ok_at, fail_count)
+		VALUES (?, ?, ?, ?, ?, ?)
+		ON CONFLICT(device_id) DO UPDATE SET
+			provider = excluded.provider,
+			token = excluded.token,
+			updated_at = excluded.updated_at,
+			fail_count = 0
+	`, pt.DeviceID, pt.Provider, pt.Token, pt.UpdatedAt, lastOK, pt.FailCount)
+	if err != nil {
+		return fmt.Errorf("upsert push token: %w", err)
+	}
+	return nil
+}
+
+// DeletePushToken removes the push token for a device.
+func (s *Store) DeletePushToken(ctx context.Context, deviceID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	res, err := s.db.ExecContext(ctx, `DELETE FROM push_tokens WHERE device_id = ?`, deviceID)
+	if err != nil {
+		return fmt.Errorf("delete push token: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("rows affected: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// GetPushToken retrieves the push token for a device.
+func (s *Store) GetPushToken(ctx context.Context, deviceID string) (*PushToken, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var pt PushToken
+	var lastOK sql.NullInt64
+	row := s.db.QueryRowContext(ctx, `
+		SELECT device_id, provider, token, updated_at, last_ok_at, fail_count
+		FROM push_tokens
+		WHERE device_id = ?
+	`, deviceID)
+	err := row.Scan(&pt.DeviceID, &pt.Provider, &pt.Token, &pt.UpdatedAt, &lastOK, &pt.FailCount)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get push token: %w", err)
+	}
+	if lastOK.Valid {
+		pt.LastOKAt = lastOK.Int64
+	}
+	return &pt, nil
+}
+
+// MarkPushOK records a successful push send to the device, resetting fail_count.
+func (s *Store) MarkPushOK(ctx context.Context, deviceID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := time.Now().UTC().Unix()
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE push_tokens
+		SET last_ok_at = ?, fail_count = 0
+		WHERE device_id = ?
+	`, now, deviceID)
+	if err != nil {
+		return fmt.Errorf("mark push ok: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("rows affected: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// MarkPushFail records a failed push attempt to the device, incrementing fail_count.
+func (s *Store) MarkPushFail(ctx context.Context, deviceID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE push_tokens
+		SET fail_count = fail_count + 1
+		WHERE device_id = ?
+	`, deviceID)
+	if err != nil {
+		return fmt.Errorf("mark push fail: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("rows affected: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
