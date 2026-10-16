@@ -55,6 +55,11 @@ func NewJWTService(priv ed25519.PrivateKey) *JWTService {
 	}
 }
 
+// KeyID returns the key ID for this JWTService.
+func (s *JWTService) KeyID() string {
+	return s.kid
+}
+
 // LoadOrGenerateJWTKey loads an Ed25519 private key from path, or generates and saves one with 0600 permissions.
 func LoadOrGenerateJWTKey(keyPath string) (ed25519.PrivateKey, error) {
 	data, err := os.ReadFile(keyPath)

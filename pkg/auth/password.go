@@ -75,6 +75,14 @@ func ValidateUsername(username string) error {
 	return nil
 }
 
+// ValidatePassword checks if password meets minimum length requirement (10 characters).
+func ValidatePassword(password string) error {
+	if len(password) < minPasswordLen {
+		return ErrPasswordTooShort
+	}
+	return nil
+}
+
 // HashPassword hashes a password using Argon2id with 64 MiB, t=3, p=2.
 func HashPassword(password string) (string, error) {
 	if len(password) < minPasswordLen {
