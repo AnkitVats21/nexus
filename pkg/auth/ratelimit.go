@@ -33,6 +33,9 @@ const (
 	RegisterWindow   = 1 * time.Hour
 	RegisterMaxCount = 5
 
+	LibraryWriteLimit  = 120
+	LibraryWriteWindow = 1 * time.Minute
+
 	AuthMinDuration = 300 * time.Millisecond
 
 	MaxRateLimitEntries = 10000
@@ -48,6 +51,7 @@ type RateLimiter struct {
 	pairingFailures map[string][]time.Time // key: ip
 	pushUpdates     map[string][]time.Time // key: deviceID
 	registers       map[string][]time.Time // key: ip
+	libraryWrites   map[int64][]time.Time  // key: userID
 	globalPairing   []time.Time
 	lastPrune       time.Time
 }
@@ -60,6 +64,7 @@ func NewRateLimiter() *RateLimiter {
 		pairingFailures: make(map[string][]time.Time),
 		pushUpdates:     make(map[string][]time.Time),
 		registers:       make(map[string][]time.Time),
+		libraryWrites:   make(map[int64][]time.Time),
 		lastPrune:       time.Now(),
 	}
 }
@@ -93,6 +98,15 @@ func (rl *RateLimiter) pruneLocked(now time.Time) {
 	rl.pruneMapLocked(rl.registers, RegisterWindow, now)
 	rl.globalPairing = pruneTimestamps(rl.globalPairing, PairingWindow, now)
 
+	for k, history := range rl.libraryWrites {
+		valid := pruneTimestamps(history, LibraryWriteWindow, now)
+		if len(valid) == 0 {
+			delete(rl.libraryWrites, k)
+		} else {
+			rl.libraryWrites[k] = valid
+		}
+	}
+
 	// If map still exceeds MaxRateLimitEntries after expired prune, evict entries to cap size
 	if len(rl.loginFailures) > MaxRateLimitEntries {
 		for k := range rl.loginFailures {
@@ -122,6 +136,14 @@ func (rl *RateLimiter) pruneLocked(now time.Time) {
 		for k := range rl.pushUpdates {
 			delete(rl.pushUpdates, k)
 			if len(rl.pushUpdates) <= MaxRateLimitEntries {
+				break
+			}
+		}
+	}
+	if len(rl.libraryWrites) > MaxRateLimitEntries {
+		for k := range rl.libraryWrites {
+			delete(rl.libraryWrites, k)
+			if len(rl.libraryWrites) <= MaxRateLimitEntries {
 				break
 			}
 		}
@@ -328,6 +350,33 @@ func (rl *RateLimiter) RecordRegister(ip string) {
 	}
 
 	rl.registers[ip] = append(pruneTimestamps(rl.registers[ip], RegisterWindow, now), now)
+}
+
+// LibraryWriteAllowed checks if a user is within the 120 writes/min rate limit.
+func (rl *RateLimiter) LibraryWriteAllowed(userID int64) bool {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	now := time.Now()
+	if len(rl.libraryWrites) >= MaxRateLimitEntries || now.Sub(rl.lastPrune) >= PruneInterval {
+		rl.pruneLocked(now)
+	}
+
+	history := pruneTimestamps(rl.libraryWrites[userID], LibraryWriteWindow, now)
+	return len(history) < LibraryWriteLimit
+}
+
+// RecordLibraryWrite records a library write event for rate limiting.
+func (rl *RateLimiter) RecordLibraryWrite(userID int64) {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	now := time.Now()
+	if len(rl.libraryWrites) >= MaxRateLimitEntries || now.Sub(rl.lastPrune) >= PruneInterval {
+		rl.pruneLocked(now)
+	}
+
+	rl.libraryWrites[userID] = append(pruneTimestamps(rl.libraryWrites[userID], LibraryWriteWindow, now), now)
 }
 
 // EnsureMinDuration sleeps if necessary to ensure authentication responses take at least minDur.

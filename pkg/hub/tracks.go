@@ -7,16 +7,78 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
+
+	"nexus/pkg/store"
 )
 
-// Track is a song as the queue holds it (docs/PROTOCOL.md, music_play).
+var trackIDRegex = regexp.MustCompile(`^[A-Za-z0-9_-]{11}$`)
+
+// Track is a song as the queue holds it (docs/PROTOCOL.md, music_play) and
+// the representation in the user library API.
 type Track struct {
-	ID       string `json:"id"`
-	Title    string `json:"title"`
-	Artist   string `json:"artist"`
-	Duration int    `json:"duration"` // seconds
+	ID        string `json:"id"`
+	Title     string `json:"title"`
+	Artist    string `json:"artist"`
+	Album     string `json:"album,omitempty"`
+	Duration  int    `json:"duration"` // seconds
+	Thumbnail string `json:"thumbnail,omitempty"`
+}
+
+// ValidateTrack checks track fields according to the library API specification:
+// id (11-char video id, ^[A-Za-z0-9_-]{11}$)
+// title (1-300)
+// artist (0-300)
+// album (optional, 0-300)
+// duration (seconds, 0-86400)
+// thumbnail (optional, https only, max 500 chars)
+func ValidateTrack(t Track) bool {
+	if !trackIDRegex.MatchString(t.ID) {
+		return false
+	}
+	titleLen := len(strings.TrimSpace(t.Title))
+	if titleLen < 1 || len(t.Title) > 300 {
+		return false
+	}
+	if len(t.Artist) > 300 {
+		return false
+	}
+	if len(t.Album) > 300 {
+		return false
+	}
+	if t.Duration < 0 || t.Duration > 86400 {
+		return false
+	}
+	if t.Thumbnail != "" {
+		if len(t.Thumbnail) > 500 || !strings.HasPrefix(t.Thumbnail, "https://") {
+			return false
+		}
+	}
+	return true
+}
+
+func (t Track) toStore() store.Track {
+	return store.Track{
+		ID:        t.ID,
+		Title:     t.Title,
+		Artist:    t.Artist,
+		Album:     t.Album,
+		Duration:  t.Duration,
+		Thumbnail: t.Thumbnail,
+	}
+}
+
+func trackFromStore(st store.Track) Track {
+	return Track{
+		ID:        st.ID,
+		Title:     st.Title,
+		Artist:    st.Artist,
+		Album:     st.Album,
+		Duration:  st.Duration,
+		Thumbnail: st.Thumbnail,
+	}
 }
 
 // TrackInfo is one looked-up song: its details, the audio stream URL (when
