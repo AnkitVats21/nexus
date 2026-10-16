@@ -1050,3 +1050,69 @@ func (s *Store) MarkPushFail(ctx context.Context, deviceID string) error {
 	}
 	return nil
 }
+
+// DeletePushTokenIf removes the push token for a device only if the current token matches the expected token.
+func (s *Store) DeletePushTokenIf(ctx context.Context, deviceID string, token string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	res, err := s.db.ExecContext(ctx, `DELETE FROM push_tokens WHERE device_id = ? AND token = ?`, deviceID, token)
+	if err != nil {
+		return fmt.Errorf("delete push token if matching: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("rows affected: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// MarkPushOKIf records a successful push send only if the token has not changed since the send started.
+func (s *Store) MarkPushOKIf(ctx context.Context, deviceID string, token string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := time.Now().UTC().Unix()
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE push_tokens
+		SET last_ok_at = ?, fail_count = 0
+		WHERE device_id = ? AND token = ?
+	`, now, deviceID, token)
+	if err != nil {
+		return fmt.Errorf("mark push ok if matching: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("rows affected: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// MarkPushFailIf records a failed push attempt only if the token has not changed since the send started.
+func (s *Store) MarkPushFailIf(ctx context.Context, deviceID string, token string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE push_tokens
+		SET fail_count = fail_count + 1
+		WHERE device_id = ? AND token = ?
+	`, deviceID, token)
+	if err != nil {
+		return fmt.Errorf("mark push fail if matching: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("rows affected: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}

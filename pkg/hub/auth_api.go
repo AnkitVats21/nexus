@@ -1103,6 +1103,12 @@ func (h *Hub) handleAdminPushTest(w http.ResponseWriter, r *http.Request) {
 	if msgType == "" {
 		msgType = push.TypeCall
 	}
+	switch msgType {
+	case push.TypeCall, push.TypeCallEnd, push.TypeMissed, push.TypeVoiceMessage:
+	default:
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("unknown message type: %q", req.Type))
+		return
+	}
 
 	fakeCallID := fmt.Sprintf("test-call-%d", time.Now().UnixNano())
 	msg := push.Message{

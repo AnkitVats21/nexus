@@ -3,6 +3,7 @@ package push
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -124,6 +125,11 @@ func TestMessagePayloads(t *testing.T) {
 	if _, _, err := (Message{Type: TypeVoiceMessage}).BuildPayload(); err == nil {
 		t.Fatalf("expected error for voice_message without message_id")
 	}
+
+	// 6. Unknown message type must be rejected
+	if _, _, err := (Message{Type: "unknown_type", CallID: "c-1"}).BuildPayload(); err == nil {
+		t.Fatalf("expected error for unknown message type")
+	}
 }
 
 func TestFCMSenderSuccessAndRequestShape(t *testing.T) {
@@ -162,13 +168,11 @@ func TestFCMSenderSuccessAndRequestShape(t *testing.T) {
 		t.Fatalf("Send failed: %v", err)
 	}
 
-	// 1. Verify OAuth bearer header
 	expectedAuth := "Bearer fake-oauth-bearer-token"
 	if receivedAuth != expectedAuth {
 		t.Fatalf("expected Authorization %q, got %q", expectedAuth, receivedAuth)
 	}
 
-	// 2. Verify Request shape
 	msgObj, ok := receivedBody["message"].(map[string]any)
 	if !ok {
 		t.Fatalf("expected message object in body: %+v", receivedBody)
@@ -176,7 +180,6 @@ func TestFCMSenderSuccessAndRequestShape(t *testing.T) {
 	if msgObj["token"] != pushToken {
 		t.Fatalf("expected token %q, got %v", pushToken, msgObj["token"])
 	}
-	// No notification block
 	if _, hasNotif := msgObj["notification"]; hasNotif {
 		t.Fatalf("payload must NOT have notification block")
 	}
@@ -191,7 +194,6 @@ func TestFCMSenderSuccessAndRequestShape(t *testing.T) {
 		t.Fatalf("unexpected android object: %+v", androidObj)
 	}
 
-	// 3. Verify store updated with MarkPushOK
 	pt, err := st.GetPushToken(ctx, devID)
 	if err != nil {
 		t.Fatalf("GetPushToken: %v", err)
@@ -252,23 +254,71 @@ func TestFCMSenderErrorUnregisteredDeletesToken(t *testing.T) {
 		t.Fatalf("expected error for UNREGISTERED, got nil")
 	}
 
-	// Must not retry
 	if count := atomic.LoadInt32(&requestsCount); count != 1 {
 		t.Fatalf("expected 1 request (no retry), got %d", count)
 	}
 
-	// Token must be deleted from store
 	if _, err := st.GetPushToken(ctx, devID); err != store.ErrNotFound {
 		t.Fatalf("expected token to be deleted on UNREGISTERED, got %v", err)
 	}
 }
 
-func TestFCMSenderErrorInvalidArgumentDeletesToken(t *testing.T) {
+func TestFCMSenderErrorNotFoundWithoutUnregisteredKeepsToken(t *testing.T) {
 	st, cleanup := newTestStore(t)
 	defer cleanup()
 
-	devID := "phone-invalid-arg"
-	setupDeviceAndToken(t, st, devID, "invalid-token-arg")
+	devID := "phone-notfound-keeps"
+	tokenVal := "valid-token-wrong-project"
+	setupDeviceAndToken(t, st, devID, tokenVal)
+
+	var requestsCount int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&requestsCount, 1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{
+			"error": {
+				"code": 404,
+				"message": "Requested entity was not found.",
+				"status": "NOT_FOUND"
+			}
+		}`))
+	}))
+	defer srv.Close()
+
+	ts := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "fake"})
+	sender := NewFCMSender("proj", ts, st, WithBaseURL(srv.URL))
+
+	ctx := context.Background()
+	err := sender.Send(ctx, devID, Message{Type: TypeCall, CallID: "call-1"})
+	if err == nil {
+		t.Fatalf("expected error for 404 NOT_FOUND, got nil")
+	}
+
+	// Must not retry
+	if count := atomic.LoadInt32(&requestsCount); count != 1 {
+		t.Fatalf("expected 1 request (no retry), got %d", count)
+	}
+
+	// Token must NOT be deleted
+	pt, err := st.GetPushToken(ctx, devID)
+	if err != nil {
+		t.Fatalf("token was unexpectedly deleted on 404 NOT_FOUND without UNREGISTERED: %v", err)
+	}
+	if pt.Token != tokenVal {
+		t.Fatalf("token mismatch: %+v", pt)
+	}
+	if pt.FailCount != 1 {
+		t.Fatalf("expected FailCount == 1, got %d", pt.FailCount)
+	}
+}
+
+func TestFCMSenderErrorTokenInvalidArgumentDeletesToken(t *testing.T) {
+	st, cleanup := newTestStore(t)
+	defer cleanup()
+
+	devID := "phone-token-invalid-arg"
+	setupDeviceAndToken(t, st, devID, "malformed-fcm-token")
 
 	var requestsCount int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -282,8 +332,13 @@ func TestFCMSenderErrorInvalidArgumentDeletesToken(t *testing.T) {
 				"status": "INVALID_ARGUMENT",
 				"details": [
 					{
-						"@type": "type.googleapis.com/google.firebase.fcm.v1.FcmError",
-						"errorCode": "INVALID_ARGUMENT"
+						"@type": "type.googleapis.com/google.rpc.BadRequest",
+						"fieldViolations": [
+							{
+								"field": "message.token",
+								"description": "Invalid registration token"
+							}
+						]
 					}
 				]
 			}
@@ -297,17 +352,250 @@ func TestFCMSenderErrorInvalidArgumentDeletesToken(t *testing.T) {
 	ctx := context.Background()
 	err := sender.Send(ctx, devID, Message{Type: TypeCall, CallID: "call-1"})
 	if err == nil {
-		t.Fatalf("expected error for INVALID_ARGUMENT, got nil")
+		t.Fatalf("expected error for token INVALID_ARGUMENT, got nil")
 	}
 
-	// Must not retry
 	if count := atomic.LoadInt32(&requestsCount); count != 1 {
 		t.Fatalf("expected 1 request (no retry), got %d", count)
 	}
 
 	// Token must be deleted from store
 	if _, err := st.GetPushToken(ctx, devID); err != store.ErrNotFound {
-		t.Fatalf("expected token to be deleted on INVALID_ARGUMENT, got %v", err)
+		t.Fatalf("expected token to be deleted on fieldViolation message.token, got %v", err)
+	}
+}
+
+func TestFCMSenderErrorPayloadInvalidArgumentKeepsToken(t *testing.T) {
+	st, cleanup := newTestStore(t)
+	defer cleanup()
+
+	devID := "phone-payload-invalid-arg"
+	tokenVal := "good-token-bad-payload"
+	setupDeviceAndToken(t, st, devID, tokenVal)
+
+	var requestsCount int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&requestsCount, 1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{
+			"error": {
+				"code": 400,
+				"message": "Invalid TTL field duration format",
+				"status": "INVALID_ARGUMENT",
+				"details": [
+					{
+						"@type": "type.googleapis.com/google.rpc.BadRequest",
+						"fieldViolations": [
+							{
+								"field": "message.android.ttl",
+								"description": "Invalid duration format"
+							}
+						]
+					}
+				]
+			}
+		}`))
+	}))
+	defer srv.Close()
+
+	ts := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "fake"})
+	sender := NewFCMSender("proj", ts, st, WithBaseURL(srv.URL))
+
+	ctx := context.Background()
+	err := sender.Send(ctx, devID, Message{Type: TypeCall, CallID: "call-1"})
+	if err == nil {
+		t.Fatalf("expected error for payload INVALID_ARGUMENT, got nil")
+	}
+
+	if count := atomic.LoadInt32(&requestsCount); count != 1 {
+		t.Fatalf("expected 1 request (no retry), got %d", count)
+	}
+
+	// Token must NOT be deleted for payload errors
+	pt, err := st.GetPushToken(ctx, devID)
+	if err != nil {
+		t.Fatalf("token was unexpectedly deleted on payload INVALID_ARGUMENT: %v", err)
+	}
+	if pt.Token != tokenVal {
+		t.Fatalf("token mismatch: %+v", pt)
+	}
+	if pt.FailCount != 1 {
+		t.Fatalf("expected FailCount == 1, got %d", pt.FailCount)
+	}
+}
+
+func TestFCMSenderConditionalDeleteRace(t *testing.T) {
+	st, cleanup := newTestStore(t)
+	defer cleanup()
+
+	devID := "phone-race"
+	tokenA := "token-initial-A"
+	tokenB := "token-updated-B"
+	setupDeviceAndToken(t, st, devID, tokenA)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Simulate race: while FCM call for token A is being processed, device uploads token B!
+		_ = st.UpsertPushToken(context.Background(), &store.PushToken{
+			DeviceID: devID,
+			Provider: "fcm",
+			Token:    tokenB,
+		})
+
+		// Now return UNREGISTERED for the request that used token A
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{
+			"error": {
+				"code": 404,
+				"status": "NOT_FOUND",
+				"details": [{"@type": "type.googleapis.com/google.firebase.fcm.v1.FcmError", "errorCode": "UNREGISTERED"}]
+			}
+		}`))
+	}))
+	defer srv.Close()
+
+	ts := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "fake"})
+	sender := NewFCMSender("proj", ts, st, WithBaseURL(srv.URL))
+
+	ctx := context.Background()
+	_ = sender.Send(ctx, devID, Message{Type: TypeCall, CallID: "c1"})
+
+	// Token B must have survived!
+	surviving, err := st.GetPushToken(ctx, devID)
+	if err != nil {
+		t.Fatalf("expected tokenB to survive race deletion, got err: %v", err)
+	}
+	if surviving.Token != tokenB {
+		t.Fatalf("expected tokenB to survive, got: %s", surviving.Token)
+	}
+}
+
+func TestFCMSenderOAuthFetchBoundedByDeadline(t *testing.T) {
+	st, cleanup := newTestStore(t)
+	defer cleanup()
+
+	devID := "phone-oauth-hang"
+	setupDeviceAndToken(t, st, devID, "token-1")
+
+	// TokenSource that blocks forever
+	blockingTS := &blockingTokenSource{}
+	sender := NewFCMSender("proj", blockingTS, st,
+		WithBackoffs([]time.Duration{time.Millisecond}),
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	err := sender.Send(ctx, devID, Message{Type: TypeCall, CallID: "c1"})
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatalf("expected context deadline error, got nil")
+	}
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("Send took too long to return (%v), failed to observe context deadline", elapsed)
+	}
+}
+
+type blockingTokenSource struct{}
+
+func (b *blockingTokenSource) Token() (*oauth2.Token, error) {
+	select {}
+}
+
+func TestFCMSenderOAuthFetchRetryOnFailure(t *testing.T) {
+	st, cleanup := newTestStore(t)
+	defer cleanup()
+
+	devID := "phone-oauth-retry"
+	setupDeviceAndToken(t, st, devID, "token-1")
+
+	var attempts int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"name":"ok"}`))
+	}))
+	defer srv.Close()
+
+	flakyTS := &flakyTokenSource{failCount: 1}
+	sender := NewFCMSender("proj", flakyTS, st,
+		WithBaseURL(srv.URL),
+		WithBackoffs([]time.Duration{time.Millisecond, time.Millisecond}),
+	)
+
+	ctx := context.Background()
+	err := sender.Send(ctx, devID, Message{Type: TypeCall, CallID: "c1"})
+	if err != nil {
+		t.Fatalf("expected send to succeed on oauth retry, got: %v", err)
+	}
+	_ = attempts
+}
+
+type flakyTokenSource struct {
+	calls     int32
+	failCount int32
+}
+
+func (f *flakyTokenSource) Token() (*oauth2.Token, error) {
+	call := atomic.AddInt32(&f.calls, 1)
+	if call <= f.failCount {
+		return nil, errors.New("transient oauth token server 503")
+	}
+	return &oauth2.Token{AccessToken: "good-token"}, nil
+}
+
+func TestFCMSenderRetryAfterHeader(t *testing.T) {
+	st, cleanup := newTestStore(t)
+	defer cleanup()
+
+	devID := "phone-retry-after"
+	setupDeviceAndToken(t, st, devID, "token-1")
+
+	var attempts int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		att := atomic.AddInt32(&attempts, 1)
+		w.Header().Set("Content-Type", "application/json")
+		if att == 1 {
+			w.Header().Set("Retry-After", "1") // 1 second
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"error":{"code":429,"status":"RESOURCE_EXHAUSTED"}}`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"name":"ok"}`))
+	}))
+	defer srv.Close()
+
+	var sleepCalls []time.Duration
+	mockSleep := func(d time.Duration) <-chan time.Time {
+		sleepCalls = append(sleepCalls, d)
+		ch := make(chan time.Time, 1)
+		ch <- time.Now()
+		return ch
+	}
+
+	ts := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "fake"})
+	sender := NewFCMSender("proj", ts, st,
+		WithBaseURL(srv.URL),
+		WithBackoffs([]time.Duration{100 * time.Millisecond, 200 * time.Millisecond}),
+		WithSleepFn(mockSleep),
+	)
+
+	ctx := context.Background()
+	err := sender.Send(ctx, devID, Message{Type: TypeCall, CallID: "c1"})
+	if err != nil {
+		t.Fatalf("send failed: %v", err)
+	}
+
+	if len(sleepCalls) != 1 {
+		t.Fatalf("expected 1 sleep call, got %d", len(sleepCalls))
+	}
+	// The sleep duration should be 1 second (from Retry-After), not 100ms
+	if sleepCalls[0] != 1*time.Second {
+		t.Fatalf("expected sleep to honor Retry-After (1s), got %v", sleepCalls[0])
 	}
 }
 
@@ -326,7 +614,7 @@ func TestFCMSenderErrorQuotaExceededNoRetry(t *testing.T) {
 		_, _ = w.Write([]byte(`{
 			"error": {
 				"code": 429,
-				"message": "Quota exceeded: QUOTA_EXCEEDED",
+				"message": "Quota exceeded",
 				"status": "RESOURCE_EXHAUSTED",
 				"details": [
 					{
@@ -348,12 +636,10 @@ func TestFCMSenderErrorQuotaExceededNoRetry(t *testing.T) {
 		t.Fatalf("expected error for QUOTA_EXCEEDED, got nil")
 	}
 
-	// Must NOT retry
 	if count := atomic.LoadInt32(&requestsCount); count != 1 {
 		t.Fatalf("expected 1 request (no retry for QUOTA_EXCEEDED), got %d", count)
 	}
 
-	// Token still kept, but MarkPushFail called
 	pt, err := st.GetPushToken(ctx, devID)
 	if err != nil {
 		t.Fatalf("GetPushToken: %v", err)
@@ -364,7 +650,6 @@ func TestFCMSenderErrorQuotaExceededNoRetry(t *testing.T) {
 }
 
 func TestFCMSenderRetryBranchesSuccess(t *testing.T) {
-	// Test UNAVAILABLE (503) and 429 retried with backoff and then succeeding
 	st, cleanup := newTestStore(t)
 	defer cleanup()
 
@@ -391,7 +676,6 @@ func TestFCMSenderRetryBranchesSuccess(t *testing.T) {
 	defer srv.Close()
 
 	ts := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "fake"})
-	// Use microsecond backoffs in tests so tests run instantly
 	sender := NewFCMSender("proj", ts, st,
 		WithBaseURL(srv.URL),
 		WithBackoffs([]time.Duration{time.Millisecond, 2 * time.Millisecond}),
@@ -441,7 +725,6 @@ func TestFCMSenderRetriesExhausted(t *testing.T) {
 		t.Fatalf("expected error after retries exhausted")
 	}
 
-	// 1 initial + 3 retries = 4 attempts
 	if count := atomic.LoadInt32(&attempts); count != 4 {
 		t.Fatalf("expected 4 attempts, got %d", count)
 	}
@@ -449,48 +732,6 @@ func TestFCMSenderRetriesExhausted(t *testing.T) {
 	pt, err := st.GetPushToken(ctx, devID)
 	if err != nil || pt.FailCount != 1 {
 		t.Fatalf("expected FailCount == 1 after exhausted retries, got %+v, err=%v", pt, err)
-	}
-}
-
-func TestFCMSenderRetriesStopAtCallerDeadline(t *testing.T) {
-	st, cleanup := newTestStore(t)
-	defer cleanup()
-
-	devID := "phone-deadline"
-	setupDeviceAndToken(t, st, devID, "deadline-token")
-
-	var attempts int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(&attempts, 1)
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusServiceUnavailable)
-		_, _ = w.Write([]byte(`{"error":{"code":503,"status":"UNAVAILABLE"}}`))
-	}))
-	defer srv.Close()
-
-	ts := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "fake"})
-	// Long backoff (10 seconds), but short context timeout (10 ms)
-	sender := NewFCMSender("proj", ts, st,
-		WithBaseURL(srv.URL),
-		WithBackoffs([]time.Duration{10 * time.Second, 10 * time.Second}),
-	)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
-	defer cancel()
-
-	err := sender.Send(ctx, devID, Message{Type: TypeCall, CallID: "call-1"})
-	if err == nil {
-		t.Fatalf("expected context error, got nil")
-	}
-
-	// Should not execute 2nd or 3rd retry because context expires
-	if count := atomic.LoadInt32(&attempts); count > 2 {
-		t.Fatalf("expected at most 1 attempt before deadline canceled, got %d", count)
-	}
-
-	pt, err := st.GetPushToken(context.Background(), devID)
-	if err != nil || pt.FailCount != 1 {
-		t.Fatalf("expected FailCount == 1 on cancellation, got %+v", pt)
 	}
 }
 

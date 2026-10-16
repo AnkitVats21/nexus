@@ -658,3 +658,73 @@ func TestPushTokensLifecycleAndCascade(t *testing.T) {
 		t.Fatalf("expected ErrNotFound for push token after device delete (CASCADE), got %v", err)
 	}
 }
+
+func TestPushTokensConditionalOperations(t *testing.T) {
+	s, cleanup := newTestStore(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	_ = s.CreateUser(ctx, &User{Username: "cond", DisplayName: "Cond User", Role: "member", PassHash: "h"})
+	u, _ := s.GetUserByUsername(ctx, "cond")
+	devID := "dev-cond-1"
+	_ = s.UpsertDevice(ctx, &Device{ID: devID, OwnerID: u.ID, Name: "D", Kind: "android"})
+
+	// Setup initial token A
+	_ = s.UpsertPushToken(ctx, &PushToken{DeviceID: devID, Provider: "fcm", Token: "tokenA"})
+
+	// 1. MarkPushOKIf: mismatch does not update, match updates
+	if err := s.MarkPushOKIf(ctx, devID, "tokenWrong"); err != ErrNotFound {
+		t.Fatalf("expected ErrNotFound for MarkPushOKIf on token mismatch, got %v", err)
+	}
+	got, _ := s.GetPushToken(ctx, devID)
+	if got.LastOKAt != 0 {
+		t.Fatalf("expected LastOKAt to be 0 after failed MarkPushOKIf, got %d", got.LastOKAt)
+	}
+	if err := s.MarkPushOKIf(ctx, devID, "tokenA"); err != nil {
+		t.Fatalf("MarkPushOKIf with match failed: %v", err)
+	}
+	got, _ = s.GetPushToken(ctx, devID)
+	if got.LastOKAt == 0 {
+		t.Fatalf("expected LastOKAt > 0 after matching MarkPushOKIf")
+	}
+
+	// 2. MarkPushFailIf: mismatch does not increment, match increments
+	if err := s.MarkPushFailIf(ctx, devID, "tokenWrong"); err != ErrNotFound {
+		t.Fatalf("expected ErrNotFound for MarkPushFailIf on token mismatch, got %v", err)
+	}
+	got, _ = s.GetPushToken(ctx, devID)
+	if got.FailCount != 0 {
+		t.Fatalf("expected FailCount to remain 0 after failed MarkPushFailIf")
+	}
+	if err := s.MarkPushFailIf(ctx, devID, "tokenA"); err != nil {
+		t.Fatalf("MarkPushFailIf with match failed: %v", err)
+	}
+	got, _ = s.GetPushToken(ctx, devID)
+	if got.FailCount != 1 {
+		t.Fatalf("expected FailCount to be 1 after matching MarkPushFailIf, got %d", got.FailCount)
+	}
+
+	// 3. DeletePushTokenIf: race simulation
+	// Device uploaded token B while send for token A was happening
+	_ = s.UpsertPushToken(ctx, &PushToken{DeviceID: devID, Provider: "fcm", Token: "tokenB"})
+
+	// DeletePushTokenIf for old tokenA must return ErrNotFound and tokenB MUST survive
+	if err := s.DeletePushTokenIf(ctx, devID, "tokenA"); err != ErrNotFound {
+		t.Fatalf("expected ErrNotFound deleting stale tokenA, got %v", err)
+	}
+	surviving, err := s.GetPushToken(ctx, devID)
+	if err != nil {
+		t.Fatalf("GetPushToken failed: %v", err)
+	}
+	if surviving.Token != "tokenB" {
+		t.Fatalf("tokenB was unexpectedly overwritten/deleted: %+v", surviving)
+	}
+
+	// DeletePushTokenIf for matching tokenB succeeds
+	if err := s.DeletePushTokenIf(ctx, devID, "tokenB"); err != nil {
+		t.Fatalf("DeletePushTokenIf for matching tokenB failed: %v", err)
+	}
+	if _, err := s.GetPushToken(ctx, devID); err != ErrNotFound {
+		t.Fatalf("expected ErrNotFound after deleting tokenB, got %v", err)
+	}
+}

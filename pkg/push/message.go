@@ -2,6 +2,7 @@ package push
 
 import (
 	"errors"
+	"fmt"
 )
 
 // MessageType indicates the nature of the push message.
@@ -21,13 +22,10 @@ const (
 // - No names, numbers or text in any payload.
 // - v=1 is the payload version.
 type Message struct {
-	Type        MessageType `json:"t"`
-	CallID      string      `json:"call_id,omitempty"`
-	Reason      string      `json:"reason,omitempty"`       // for call_end: "answered_elsewhere", "cancelled", "timeout"
-	MessageID   string      `json:"message_id,omitempty"`   // for voice_message
-	Priority    string      `json:"priority,omitempty"`     // optional override: "HIGH" or "NORMAL"
-	TTL         string      `json:"ttl,omitempty"`          // optional override: duration ending in 's', e.g. "30s"
-	CollapseKey string      `json:"collapse_key,omitempty"` // optional override
+	Type      MessageType `json:"t"`
+	CallID    string      `json:"call_id,omitempty"`
+	Reason    string      `json:"reason,omitempty"`     // for call_end: "answered_elsewhere", "cancelled", "timeout"
+	MessageID string      `json:"message_id,omitempty"` // for voice_message
 }
 
 // AndroidConfig holds the android-specific fields in the FCM HTTP v1 payload.
@@ -88,29 +86,7 @@ func (m Message) BuildPayload() (map[string]string, AndroidConfig, error) {
 		ttl = "86400s" // 1 day
 
 	default:
-		// Unknown or custom message type
-		if m.CallID != "" {
-			data["call_id"] = m.CallID
-			collapseKey = m.CallID
-		}
-		if m.MessageID != "" {
-			data["message_id"] = m.MessageID
-		}
-		if m.Reason != "" {
-			data["reason"] = m.Reason
-		}
-		priority = "NORMAL"
-		ttl = "60s"
-	}
-
-	if m.Priority != "" {
-		priority = m.Priority
-	}
-	if m.TTL != "" {
-		ttl = m.TTL
-	}
-	if m.CollapseKey != "" {
-		collapseKey = m.CollapseKey
+		return nil, AndroidConfig{}, fmt.Errorf("unknown message type: %q", m.Type)
 	}
 
 	android := AndroidConfig{

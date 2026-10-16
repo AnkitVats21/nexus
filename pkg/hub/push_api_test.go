@@ -363,6 +363,15 @@ func TestAdminPushTestEndpoint(t *testing.T) {
 	if len(sent) != 1 || sent[0].DeviceID != devID || sent[0].Message.Type != push.TypeCall {
 		t.Fatalf("fake sender did not record expected message: %+v", sent)
 	}
+
+	// 7. Unknown message type rejected with 400 Bad Request
+	res, _ = doJSON(t, srv, http.MethodPost, "/hub/api/admin/push-test", map[string]string{
+		"device_id": devID,
+		"t":         "unsupported_type",
+	}, adminCookie)
+	if res.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for unknown message type, got %d", res.StatusCode)
+	}
 }
 
 func TestPushOffModeStartup(t *testing.T) {
