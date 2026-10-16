@@ -3,9 +3,11 @@ package hub
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"nexus/pkg/auth"
+	"nexus/pkg/push"
 	"nexus/pkg/store"
 	"strconv"
 	"strings"
@@ -141,6 +143,20 @@ func (h *Hub) serveHubAPI(w http.ResponseWriter, r *http.Request) {
 	case path == "/devices":
 		if r.Method == http.MethodGet {
 			h.handleDevicesGet(w, r)
+			return
+		}
+	case path == "/devices/self/push":
+		if r.Method == http.MethodPut {
+			h.handleDeviceSelfPushPut(w, r)
+			return
+		}
+		if r.Method == http.MethodDelete {
+			h.handleDeviceSelfPushDelete(w, r)
+			return
+		}
+	case path == "/admin/push-test":
+		if r.Method == http.MethodPost {
+			h.handleAdminPushTest(w, r)
 			return
 		}
 	case strings.HasPrefix(path, "/devices/"):
@@ -938,4 +954,178 @@ func (h *Hub) handleDeviceDelete(w http.ResponseWriter, r *http.Request, id stri
 	}
 
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Push Endpoints
+// ─────────────────────────────────────────────────────────────────────────────
+
+func (h *Hub) authenticateDeviceBearer(r *http.Request) (*store.Device, error) {
+	authHeader := r.Header.Get("Authorization")
+	if authHeader == "" {
+		return nil, errors.New("missing authorization header")
+	}
+	parts := strings.SplitN(authHeader, " ", 2)
+	if len(parts) != 2 || !strings.EqualFold(parts[0], "bearer") {
+		return nil, errors.New("invalid authorization header format")
+	}
+	token := strings.TrimSpace(parts[1])
+	if token == "" {
+		return nil, errors.New("empty bearer token")
+	}
+
+	st := h.Store()
+	if st == nil {
+		return nil, errors.New("store not available")
+	}
+
+	tokHash := auth.HashDeviceToken(token)
+	dev, err := st.GetDeviceByTokenHash(r.Context(), tokHash)
+	if err != nil {
+		return nil, err
+	}
+	return dev, nil
+}
+
+type selfPushReq struct {
+	Provider string `json:"provider"`
+	Token    string `json:"token"`
+}
+
+func (h *Hub) handleDeviceSelfPushPut(w http.ResponseWriter, r *http.Request) {
+	dev, err := h.authenticateDeviceBearer(r)
+	if err != nil || dev == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	rl := h.pushTokenRateLimiter()
+	if !rl.PushTokenUpdateAllowed(dev.ID) {
+		writeError(w, http.StatusTooManyRequests, "rate limit exceeded: max 10 updates per hour")
+		return
+	}
+
+	var req selfPushReq
+	if !readJSON(w, r, &req) {
+		return
+	}
+
+	if req.Provider != "fcm" {
+		writeError(w, http.StatusBadRequest, "invalid provider: must be 'fcm'")
+		return
+	}
+
+	token := strings.TrimSpace(req.Token)
+	if token == "" || len(token) >= 4096 {
+		writeError(w, http.StatusBadRequest, "invalid token: must be non-empty and under 4 KB")
+		return
+	}
+
+	pt := &store.PushToken{
+		DeviceID: dev.ID,
+		Provider: req.Provider,
+		Token:    token,
+	}
+	if err := h.Store().UpsertPushToken(r.Context(), pt); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to save push token")
+		return
+	}
+
+	rl.RecordPushTokenUpdate(dev.ID)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (h *Hub) handleDeviceSelfPushDelete(w http.ResponseWriter, r *http.Request) {
+	dev, err := h.authenticateDeviceBearer(r)
+	if err != nil || dev == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	if err := h.Store().DeletePushToken(r.Context(), dev.ID); err != nil && !errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusInternalServerError, "failed to delete push token")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+type adminPushTestReq struct {
+	DeviceID string `json:"device_id"`
+	Type     string `json:"t"`
+}
+
+func (h *Hub) handleAdminPushTest(w http.ResponseWriter, r *http.Request) {
+	if err := auth.ValidateCSRF(r, h.cfg.PublicURL); err != nil {
+		writeError(w, http.StatusForbidden, "csrf validation failed")
+		return
+	}
+
+	u, _, err := h.authenticate(r)
+	if err != nil || u == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if u.MustChange {
+		writeError(w, http.StatusForbidden, "password change required")
+		return
+	}
+	if u.Role != "admin" {
+		writeError(w, http.StatusForbidden, "admin role required")
+		return
+	}
+
+	var req adminPushTestReq
+	if !readJSON(w, r, &req) {
+		return
+	}
+
+	req.DeviceID = strings.TrimSpace(req.DeviceID)
+	if req.DeviceID == "" {
+		writeError(w, http.StatusBadRequest, "device_id is required")
+		return
+	}
+
+	if h.pushSender == nil {
+		writeError(w, http.StatusServiceUnavailable, "push off")
+		return
+	}
+
+	if h.Store() != nil {
+		pt, err := h.Store().GetPushToken(r.Context(), req.DeviceID)
+		if err != nil || pt == nil || pt.Token == "" {
+			writeError(w, http.StatusBadRequest, "no token")
+			return
+		}
+	}
+
+	msgType := push.MessageType(req.Type)
+	if msgType == "" {
+		msgType = push.TypeCall
+	}
+
+	fakeCallID := fmt.Sprintf("test-call-%d", time.Now().UnixNano())
+	msg := push.Message{
+		Type:   msgType,
+		CallID: fakeCallID,
+	}
+	if msgType == push.TypeVoiceMessage {
+		msg.MessageID = fakeCallID
+	}
+
+	if err := h.pushSender.Send(r.Context(), req.DeviceID, msg); err != nil {
+		if errors.Is(err, push.ErrNoPushToken) || errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusBadRequest, "no token")
+			return
+		}
+		writeError(w, http.StatusBadGateway, "push failed: "+err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":        true,
+		"device_id": req.DeviceID,
+		"t":         msgType,
+		"call_id":   fakeCallID,
+	})
 }

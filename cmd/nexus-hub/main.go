@@ -64,6 +64,8 @@ func main() {
 	pairingPepperFile := flag.String("pairing-pepper-file", filepath.Join(home, ".config", "nexus", "pairing_pepper"), "pairing pepper file path (0600)")
 	trustedProxy := flag.String("trusted-proxy", "", "trusted reverse proxy IP for HTTPS headers")
 	publicURL := flag.String("public-url", "", "public URL of the hub for CSRF and external links")
+	fcmCredentials := flag.String("fcm-credentials", "", "path to Firebase service account JSON file for push notifications")
+	fcmProject := flag.String("fcm-project", "", "Firebase project ID for push notifications")
 	var allowOrigins stringSlice
 	flag.Var(&allowOrigins, "allow-origin", "repeatable allowed Origin for browser WebSocket connections (e.g. http://localhost:5173)")
 	debug := flag.Bool("debug", false, "debug logging")
@@ -170,7 +172,8 @@ func main() {
 	h, err := hub.New(hub.Config{Version: version, Tokens: tokens, WebDir: *webDir, DeviceWebDir: *deviceWebDir, Log: log,
 		GeminiKey: geminiKey, Uplink: *uplink, MCP: mcp, Tracks: tracks, Cache: cache,
 		DBPath: *dbPath, TrustedProxy: *trustedProxy, PublicURL: *publicURL, AllowedOrigins: allowOrigins,
-		LegacyTokens: legacyTokens, PairingPepperPath: *pairingPepperFile})
+		LegacyTokens: legacyTokens, PairingPepperPath: *pairingPepperFile,
+		FCMCredentials: *fcmCredentials, FCMProject: *fcmProject})
 	if err != nil {
 		log.Error("Failed to initialize hub", "err", err)
 		os.Exit(1)

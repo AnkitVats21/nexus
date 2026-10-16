@@ -35,6 +35,7 @@ import (
 	"time"
 
 	"nexus/pkg/auth"
+	"nexus/pkg/push"
 	"nexus/pkg/store"
 
 	"github.com/coder/websocket"
@@ -106,6 +107,11 @@ type Config struct {
 	PairingPepperPath string
 	// Test-only: bypass database and authentication subsystem.
 	NoAuth bool
+
+	// Push notifications (FCM HTTP v1).
+	FCMCredentials string
+	FCMProject     string
+	PushSender     push.Sender
 }
 
 func (c Config) legacyTokensEnabled() bool {
@@ -132,6 +138,9 @@ type Hub struct {
 
 	store *store.Store
 	auth  *auth.Service
+
+	pushSender          push.Sender
+	fallbackRateLimiter *auth.RateLimiter
 
 	pairingPepper []byte
 	legacyLogged  map[string]bool
@@ -282,6 +291,26 @@ func New(cfg Config) (*Hub, error) {
 		return nil, errors.New("auth is required: specify DBPath, Store, or Auth (or NoAuth for tests)")
 	}
 
+	h.fallbackRateLimiter = auth.NewRateLimiter()
+
+	if cfg.PushSender != nil {
+		h.pushSender = cfg.PushSender
+	} else if cfg.FCMCredentials != "" && cfg.FCMProject != "" {
+		if h.store != nil {
+			sender, err := push.NewFCMSenderFromCredentialsFile(cfg.FCMProject, cfg.FCMCredentials, h.store, push.WithLogger(h.log))
+			if err != nil {
+				h.log.Warn("push off: failed to initialize FCM sender", "err", err)
+			} else {
+				h.pushSender = sender
+				h.log.Info("FCM push sender initialized", "project", cfg.FCMProject)
+			}
+		} else {
+			h.log.Warn("push off: store not available")
+		}
+	} else {
+		h.log.Info("push off")
+	}
+
 	return h, nil
 }
 
@@ -293,6 +322,23 @@ func (h *Hub) Store() *store.Store {
 // Auth returns the authentication service attached to this Hub, or nil.
 func (h *Hub) Auth() *auth.Service {
 	return h.auth
+}
+
+// PushSender returns the push notification sender attached to this Hub, or nil.
+func (h *Hub) PushSender() push.Sender {
+	return h.pushSender
+}
+
+// SetPushSender sets or overrides the push notification sender (for tests).
+func (h *Hub) SetPushSender(sender push.Sender) {
+	h.pushSender = sender
+}
+
+func (h *Hub) pushTokenRateLimiter() *auth.RateLimiter {
+	if h.auth != nil {
+		return h.auth.RateLimiter()
+	}
+	return h.fallbackRateLimiter
 }
 
 // Handler serves the board endpoint, the browser socket, the API proxy and

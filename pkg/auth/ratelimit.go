@@ -27,6 +27,9 @@ const (
 	PairingIPMaxFailures     = 10
 	PairingGlobalMaxFailures = 100
 
+	PushUpdateWindow   = 1 * time.Hour
+	PushUpdateMaxCount = 10
+
 	AuthMinDuration = 300 * time.Millisecond
 
 	MaxRateLimitEntries = 10000
@@ -40,6 +43,7 @@ type RateLimiter struct {
 	loginFailures   map[string][]time.Time // key: "u:<username>" or "ip:<ip>"
 	setupFailures   map[string][]time.Time // key: ip
 	pairingFailures map[string][]time.Time // key: ip
+	pushUpdates     map[string][]time.Time // key: deviceID
 	globalPairing   []time.Time
 	lastPrune       time.Time
 }
@@ -50,6 +54,7 @@ func NewRateLimiter() *RateLimiter {
 		loginFailures:   make(map[string][]time.Time),
 		setupFailures:   make(map[string][]time.Time),
 		pairingFailures: make(map[string][]time.Time),
+		pushUpdates:     make(map[string][]time.Time),
 		lastPrune:       time.Now(),
 	}
 }
@@ -79,6 +84,7 @@ func (rl *RateLimiter) pruneLocked(now time.Time) {
 	rl.pruneMapLocked(rl.loginFailures, LoginWindow, now)
 	rl.pruneMapLocked(rl.setupFailures, SetupWindow, now)
 	rl.pruneMapLocked(rl.pairingFailures, PairingWindow, now)
+	rl.pruneMapLocked(rl.pushUpdates, PushUpdateWindow, now)
 	rl.globalPairing = pruneTimestamps(rl.globalPairing, PairingWindow, now)
 
 	// If map still exceeds MaxRateLimitEntries after expired prune, evict entries to cap size
@@ -102,6 +108,14 @@ func (rl *RateLimiter) pruneLocked(now time.Time) {
 		for k := range rl.pairingFailures {
 			delete(rl.pairingFailures, k)
 			if len(rl.pairingFailures) <= MaxRateLimitEntries {
+				break
+			}
+		}
+	}
+	if len(rl.pushUpdates) > MaxRateLimitEntries {
+		for k := range rl.pushUpdates {
+			delete(rl.pushUpdates, k)
+			if len(rl.pushUpdates) <= MaxRateLimitEntries {
 				break
 			}
 		}
@@ -252,6 +266,33 @@ func (rl *RateLimiter) RecordPairingFailure(ip string) {
 	ip = cleanIP(ip)
 	rl.pairingFailures[ip] = append(pruneTimestamps(rl.pairingFailures[ip], PairingWindow, now), now)
 	rl.globalPairing = append(pruneTimestamps(rl.globalPairing, PairingWindow, now), now)
+}
+
+// PushTokenUpdateAllowed checks if deviceID is allowed to update its push token (max 10 per hour).
+func (rl *RateLimiter) PushTokenUpdateAllowed(deviceID string) bool {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	now := time.Now()
+	if len(rl.pushUpdates) >= MaxRateLimitEntries || now.Sub(rl.lastPrune) >= PruneInterval {
+		rl.pruneLocked(now)
+	}
+
+	history := pruneTimestamps(rl.pushUpdates[deviceID], PushUpdateWindow, now)
+	return len(history) < PushUpdateMaxCount
+}
+
+// RecordPushTokenUpdate records a push token update for deviceID.
+func (rl *RateLimiter) RecordPushTokenUpdate(deviceID string) {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	now := time.Now()
+	if len(rl.pushUpdates) >= MaxRateLimitEntries || now.Sub(rl.lastPrune) >= PruneInterval {
+		rl.pruneLocked(now)
+	}
+
+	rl.pushUpdates[deviceID] = append(pruneTimestamps(rl.pushUpdates[deviceID], PushUpdateWindow, now), now)
 }
 
 // EnsureMinDuration sleeps if necessary to ensure authentication responses take at least minDur.
