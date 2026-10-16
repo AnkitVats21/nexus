@@ -8,9 +8,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"nexus/pkg/auth"
+	"nexus/pkg/store"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -69,6 +71,7 @@ func setupTestHub(t *testing.T, allowSignup *bool) (*Hub, *httptest.Server, *htt
 	}
 
 	cleanup := func() {
+		h.Close()
 		srv.Close()
 		if h.Store() != nil {
 			h.Store().Close()
@@ -609,7 +612,7 @@ func TestAppAuth_DeviceRegister(t *testing.T) {
 		t.Fatalf("approve grace failed: %d", res.StatusCode)
 	}
 
-	// Grace gets Bearer token
+	// Grace gets Bearer token and refresh token
 	res, body = doJSON(t, srv, http.MethodPost, "/hub/api/auth/token", map[string]string{
 		"username": "grace",
 		"password": "GracePassword123!",
@@ -617,6 +620,15 @@ func TestAppAuth_DeviceRegister(t *testing.T) {
 	var tokenData map[string]any
 	_ = json.Unmarshal(body, &tokenData)
 	graceBearer := tokenData["access_token"].(string)
+	graceRefresh := tokenData["refresh_token"].(string)
+
+	// Admin gets refresh token for foreign token test
+	res, body = doJSON(t, srv, http.MethodPost, "/hub/api/auth/token", map[string]string{
+		"username": "admin",
+		"password": "AdminPassword123!",
+	}, nil)
+	_ = json.Unmarshal(body, &tokenData)
+	adminRefresh := tokenData["refresh_token"].(string)
 
 	// 1. Non-android kind -> 400
 	res, _ = doBearerReq(t, srv, http.MethodPost, "/hub/api/devices/register", map[string]string{
@@ -638,11 +650,37 @@ func TestAppAuth_DeviceRegister(t *testing.T) {
 		t.Fatalf("expected 400 for invalid id, got %d", res.StatusCode)
 	}
 
-	// 3. New device -> 200 OK + device_token
+	// 2b. Foreign refresh token -> 400 and binds nothing
+	res, _ = doBearerReq(t, srv, http.MethodPost, "/hub/api/devices/register", map[string]string{
+		"id":            "nexus-app-phone-foreign",
+		"name":          "Grace Phone",
+		"kind":          "android",
+		"refresh_token": adminRefresh,
+	}, graceBearer, nil)
+	if res.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for foreign refresh token, got %d", res.StatusCode)
+	}
+	if _, err := h.Store().GetDeviceByID(ctx, "nexus-app-phone-foreign"); err != store.ErrNotFound {
+		t.Fatalf("expected device not created when foreign token supplied, got %v", err)
+	}
+
+	// 2c. Unknown refresh token -> 400
+	res, _ = doBearerReq(t, srv, http.MethodPost, "/hub/api/devices/register", map[string]string{
+		"id":            "nexus-app-phone-unk",
+		"name":          "Grace Phone",
+		"kind":          "android",
+		"refresh_token": "unknown-refresh-token-xyz",
+	}, graceBearer, nil)
+	if res.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for unknown refresh token, got %d", res.StatusCode)
+	}
+
+	// 3. New device with own valid refresh token -> 200 OK + device_token and binds family
 	res, body = doBearerReq(t, srv, http.MethodPost, "/hub/api/devices/register", map[string]string{
-		"id":   "nexus-app-phone1",
-		"name": "Grace Phone",
-		"kind": "android",
+		"id":            "nexus-app-phone1",
+		"name":          "Grace Phone",
+		"kind":          "android",
+		"refresh_token": graceRefresh,
 	}, graceBearer, nil)
 	if res.StatusCode != http.StatusOK {
 		t.Fatalf("device register failed: %d, body: %s", res.StatusCode, string(body))
@@ -654,10 +692,15 @@ func TestAppAuth_DeviceRegister(t *testing.T) {
 		t.Fatalf("expected device_token in response")
 	}
 
-	// Check DB
+	// Check DB: device exists and refresh token is bound to device_id
 	dev, err := h.Store().GetDeviceByID(ctx, "nexus-app-phone1")
 	if err != nil || dev.Kind != "android" || dev.OwnerID != graceID {
 		t.Fatalf("invalid device in DB: %v, err: %v", dev, err)
+	}
+	rtHash := auth.HashRefreshToken(graceRefresh)
+	dbRT, err := h.Store().GetRefreshTokenByHash(ctx, rtHash)
+	if err != nil || dbRT.DeviceID == nil || *dbRT.DeviceID != "nexus-app-phone1" {
+		t.Fatalf("expected refresh token to be bound to nexus-app-phone1, got %+v", dbRT)
 	}
 
 	// 4. Re-registering existing device owned by same user -> rotates token
@@ -678,6 +721,25 @@ func TestAppAuth_DeviceRegister(t *testing.T) {
 	dev, _ = h.Store().GetDeviceByID(ctx, "nexus-app-phone1")
 	if dev.Name != "Grace Phone Renamed" {
 		t.Fatalf("expected name updated to Grace Phone Renamed, got %s", dev.Name)
+	}
+
+	// 4b. Used refresh token -> 400
+	// Rotate graceRefresh to mark it used
+	res, body = doJSON(t, srv, http.MethodPost, "/hub/api/auth/refresh", map[string]string{
+		"refresh_token": graceRefresh,
+	}, nil)
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("refresh failed: %d", res.StatusCode)
+	}
+	// graceRefresh is now used -> passing it to devices/register must fail with 400
+	res, _ = doBearerReq(t, srv, http.MethodPost, "/hub/api/devices/register", map[string]string{
+		"id":            "nexus-app-phone-used",
+		"name":          "Grace Phone",
+		"kind":          "android",
+		"refresh_token": graceRefresh,
+	}, graceBearer, nil)
+	if res.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 when registering device with used refresh token, got %d", res.StatusCode)
 	}
 
 	// 5. Another user (admin) registering device with same ID -> 409 Conflict
@@ -743,5 +805,159 @@ func TestAppAuth_BearerAuth_And_CSRFRules(t *testing.T) {
 	res, _ = doBearerReq(t, srv, http.MethodPost, "/hub/api/pairing", nil, adminBearer, nil)
 	if res.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200 for bearer pairing POST without CSRF, got %d", res.StatusCode)
+	}
+}
+
+func TestAppAuth_ConcurrentRefresh_RealConcurrency(t *testing.T) {
+	_, srv, adminCookie, cleanup := setupTestHub(t, nil)
+	defer cleanup()
+
+	// Register & approve user "helen"
+	res, _ := doJSON(t, srv, http.MethodPost, "/hub/api/register", map[string]string{
+		"username": "helen",
+		"password": "HelenPassword123!",
+	}, nil)
+	res, body := doJSON(t, srv, http.MethodGet, "/hub/api/users?status=pending", nil, adminCookie)
+	var usersList []map[string]any
+	_ = json.Unmarshal(body, &usersList)
+	var helenID int64
+	for _, u := range usersList {
+		if u["username"] == "helen" {
+			helenID = int64(u["id"].(float64))
+			break
+		}
+	}
+	res, _ = doJSON(t, srv, http.MethodPost, fmt.Sprintf("/hub/api/users/%d/approve", helenID), nil, adminCookie)
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("approve helen failed: %d", res.StatusCode)
+	}
+
+	// Helen logs in -> gets refresh token
+	res, body = doJSON(t, srv, http.MethodPost, "/hub/api/auth/token", map[string]string{
+		"username": "helen",
+		"password": "HelenPassword123!",
+	}, nil)
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("auth token failed: %d", res.StatusCode)
+	}
+	var tokenData map[string]any
+	_ = json.Unmarshal(body, &tokenData)
+	rt := tokenData["refresh_token"].(string)
+
+	// Two concurrent refreshes with the exact same token
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	statusCodes := make([]int, 2)
+	newTokens := make([]string, 2)
+
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			<-start // synchronize launch
+			res, respBody := doJSON(t, srv, http.MethodPost, "/hub/api/auth/refresh", map[string]string{
+				"refresh_token": rt,
+			}, nil)
+			statusCodes[idx] = res.StatusCode
+			if res.StatusCode == http.StatusOK {
+				var data map[string]any
+				if err := json.Unmarshal(respBody, &data); err == nil && data["refresh_token"] != nil {
+					newTokens[idx] = data["refresh_token"].(string)
+				}
+			}
+		}(i)
+	}
+
+	close(start) // trigger both simultaneously
+	wg.Wait()
+
+	// Exactly one 200 and one 401
+	count200 := 0
+	count401 := 0
+	var winnerNewToken string
+	for i, code := range statusCodes {
+		if code == http.StatusOK {
+			count200++
+			winnerNewToken = newTokens[i]
+		} else if code == http.StatusUnauthorized {
+			count401++
+		}
+	}
+	if count200 != 1 || count401 != 1 {
+		t.Fatalf("expected exactly one 200 and one 401, got statuses: %v", statusCodes)
+	}
+
+	// Family should be deleted because loser detected reuse!
+	// Re-calling refresh with the new token from winner should fail with 401
+	if winnerNewToken != "" {
+		res, _ = doJSON(t, srv, http.MethodPost, "/hub/api/auth/refresh", map[string]string{
+			"refresh_token": winnerNewToken,
+		}, nil)
+		if res.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("expected 401 refreshing with winner token because family was deleted, got %d", res.StatusCode)
+		}
+	}
+}
+
+func TestAppAuth_HubPruneRefreshTokensOnStartupAndTicker(t *testing.T) {
+	dir, err := os.MkdirTemp("", "nexus-prune-hub-*")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	defer os.RemoveAll(dir)
+	dbPath := filepath.Join(dir, "hub.db")
+
+	// Pre-populate DB with expired and unexpired tokens
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	ctx := context.Background()
+	u := &store.User{
+		Username:    "pruner",
+		DisplayName: "Pruner",
+		Role:        "member",
+		Status:      "active",
+		PassHash:    "dummy",
+	}
+	_ = st.CreateUser(ctx, u)
+	now := time.Now().UTC().Unix()
+	var hExp [32]byte
+	copy(hExp[:], "exp_token_hash__________________")
+	_ = st.CreateRefreshToken(ctx, &store.RefreshToken{
+		IDHash:    hExp,
+		UserID:    u.ID,
+		FamilyID:  "fam-exp",
+		CreatedAt: now - 200,
+		ExpiresAt: now - 100,
+	})
+	var hActive [32]byte
+	copy(hActive[:], "active_token_hash_______________")
+	_ = st.CreateRefreshToken(ctx, &store.RefreshToken{
+		IDHash:    hActive,
+		UserID:    u.ID,
+		FamilyID:  "fam-active",
+		CreatedAt: now,
+		ExpiresAt: now + 3600,
+	})
+	st.Close()
+
+	// Launch hub: startup must prune expired token
+	h, err := New(Config{
+		Version: "test",
+		Tokens:  []string{testToken},
+		DBPath:  dbPath,
+	})
+	if err != nil {
+		t.Fatalf("New hub: %v", err)
+	}
+	defer h.Close()
+
+	// Check that expired token is gone and active token is preserved
+	if _, err := h.Store().GetRefreshTokenByHash(ctx, hExp); err != store.ErrNotFound {
+		t.Fatalf("expected expired token to be pruned on startup, got %v", err)
+	}
+	if _, err := h.Store().GetRefreshTokenByHash(ctx, hActive); err != nil {
+		t.Fatalf("expected active token to be preserved, got %v", err)
 	}
 }

@@ -161,6 +161,8 @@ type Hub struct {
 
 	pairingPepper []byte
 	legacyLogged  map[string]bool
+
+	stopMaintenance context.CancelFunc
 }
 
 type edge struct {
@@ -346,7 +348,41 @@ func New(cfg Config) (*Hub, error) {
 		h.auth.SetJWT(h.jwt)
 	}
 
+	if h.store != nil {
+		if n, err := h.store.PruneRefreshTokens(context.Background(), time.Now().UTC().Unix()); err != nil {
+			h.log.Warn("failed to prune refresh tokens on startup", "err", err)
+		} else if n > 0 {
+			h.log.Info("pruned expired refresh tokens on startup", "count", n)
+		}
+
+		maintCtx, maintCancel := context.WithCancel(context.Background())
+		h.stopMaintenance = maintCancel
+		go func() {
+			ticker := time.NewTicker(6 * time.Hour)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-maintCtx.Done():
+					return
+				case <-ticker.C:
+					if n, err := h.store.PruneRefreshTokens(maintCtx, time.Now().UTC().Unix()); err != nil {
+						h.log.Warn("periodic prune refresh tokens failed", "err", err)
+					} else if n > 0 {
+						h.log.Info("pruned expired refresh tokens", "count", n)
+					}
+				}
+			}
+		}()
+	}
+
 	return h, nil
+}
+
+// Close stops background maintenance tasks and releases resources.
+func (h *Hub) Close() {
+	if h.stopMaintenance != nil {
+		h.stopMaintenance()
+	}
 }
 
 // Store returns the storage engine attached to this Hub, or nil.

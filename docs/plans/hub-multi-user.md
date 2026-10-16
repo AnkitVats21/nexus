@@ -291,7 +291,7 @@ Implemented in `task-037` to support native Android app companion authentication
   - Accepts alphanumeric + hyphen IDs (max 64 chars) or auto-generates `nexus-app-<12 hex digits>`.
   - Rotates device token if device is already owned by the requesting user.
   - Returns `409 Conflict` if device ID is registered to another user.
-  - Binds refresh family to device ID if `refresh_family` is supplied in the request body.
+  - Binds refresh family to device ID if optional `refresh_token` is supplied in the request body (must be caller's own, unused, and unexpired token; foreign/used/expired/unknown tokens answer `400 Bad Request` and bind nothing).
   - Returns 32-byte CSPRNG `device_token` (hash stored in DB).
 
 ### 5. Bearer Auth & CSRF Rules

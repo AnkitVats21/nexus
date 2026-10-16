@@ -553,12 +553,6 @@ func (h *Hub) handleAuthRefreshPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	now := time.Now().UTC().Unix()
-	if err := h.store.MarkRefreshTokenUsed(r.Context(), hash, now); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to mark refresh token used")
-		return
-	}
-
 	newJWT, _, err := h.jwt.SignUserToken(u)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to sign token")
@@ -571,6 +565,7 @@ func (h *Hub) handleAuthRefreshPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	now := time.Now().UTC().Unix()
 	ip := auth.ClientIP(r, h.cfg.TrustedProxy)
 	newRT := &store.RefreshToken{
 		IDHash:    newHash,
@@ -582,8 +577,13 @@ func (h *Hub) handleAuthRefreshPost(w http.ResponseWriter, r *http.Request) {
 		UserAgent: r.UserAgent(),
 		IP:        ip,
 	}
-	if err := h.store.CreateRefreshToken(r.Context(), newRT); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to store refresh token")
+
+	if err := h.store.RotateRefreshToken(r.Context(), hash, now, newRT); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusUnauthorized, "refresh token reused")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to rotate refresh token")
 		return
 	}
 
@@ -1310,10 +1310,10 @@ type deviceResponse struct {
 }
 
 type deviceRegisterReq struct {
-	ID            string `json:"id"`
-	Name          string `json:"name"`
-	Kind          string `json:"kind"`
-	RefreshFamily string `json:"refresh_family"`
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	Kind         string `json:"kind"`
+	RefreshToken string `json:"refresh_token"`
 }
 
 func (h *Hub) handleDevicesRegisterPost(w http.ResponseWriter, r *http.Request) {
@@ -1340,6 +1340,17 @@ func (h *Hub) handleDevicesRegisterPost(w http.ResponseWriter, r *http.Request) 
 	if req.Kind != "android" {
 		writeError(w, http.StatusBadRequest, "invalid kind: must be android")
 		return
+	}
+
+	var familyToBind string
+	if req.RefreshToken != "" {
+		rtHash := auth.HashRefreshToken(req.RefreshToken)
+		rt, err := h.store.GetRefreshTokenByHash(r.Context(), rtHash)
+		if err != nil || rt == nil || rt.UserID != u.ID || rt.UsedAt != nil || time.Now().UTC().Unix() > rt.ExpiresAt {
+			writeError(w, http.StatusBadRequest, "invalid refresh token for binding")
+			return
+		}
+		familyToBind = rt.FamilyID
 	}
 
 	id := req.ID
@@ -1387,8 +1398,8 @@ func (h *Hub) handleDevicesRegisterPost(w http.ResponseWriter, r *http.Request) 
 			writeError(w, http.StatusInternalServerError, "failed to update device")
 			return
 		}
-		if req.RefreshFamily != "" {
-			_ = h.auth.Store().BindRefreshFamilyToDevice(r.Context(), req.RefreshFamily, id)
+		if familyToBind != "" {
+			_ = h.auth.Store().BindRefreshFamilyToDevice(r.Context(), familyToBind, id)
 		}
 		writeJSON(w, http.StatusOK, map[string]string{
 			"device_token": rawToken,
@@ -1414,8 +1425,8 @@ func (h *Hub) handleDevicesRegisterPost(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusInternalServerError, "failed to create device")
 		return
 	}
-	if req.RefreshFamily != "" {
-		_ = h.auth.Store().BindRefreshFamilyToDevice(r.Context(), req.RefreshFamily, id)
+	if familyToBind != "" {
+		_ = h.auth.Store().BindRefreshFamilyToDevice(r.Context(), familyToBind, id)
 	}
 	writeJSON(w, http.StatusOK, map[string]string{
 		"device_token": rawToken,

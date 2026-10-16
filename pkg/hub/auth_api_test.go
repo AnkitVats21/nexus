@@ -41,6 +41,7 @@ func newAuthTestHub(t *testing.T) (*Hub, *httptest.Server, func()) {
 	}
 	srv := httptest.NewServer(h.Handler())
 	cleanup := func() {
+		h.Close()
 		srv.Close()
 		if h.Store() != nil {
 			h.Store().Close()
