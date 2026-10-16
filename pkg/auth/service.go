@@ -23,6 +23,8 @@ var (
 	ErrAdminRequired         = errors.New("admin role required")
 	ErrCannotDeleteSelf      = errors.New("cannot delete own account")
 	ErrCannotDeleteLastAdmin = errors.New("cannot delete last admin user")
+	ErrPendingApproval       = errors.New("account is pending approval")
+	ErrUserDisabled          = errors.New("account is disabled")
 )
 
 // dummyPasswordHash is a pre-computed valid Argon2id hash used to prevent timing
@@ -35,6 +37,7 @@ type Service struct {
 	rateLimiter  *RateLimiter
 	trustedProxy string
 	publicURL    string
+	jwt          *JWTService
 
 	mu        sync.RWMutex
 	setupCode string
@@ -130,6 +133,20 @@ func (s *Service) PublicURL() string {
 	return s.publicURL
 }
 
+// JWT returns the JWTService if configured.
+func (s *Service) JWT() *JWTService {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.jwt
+}
+
+// SetJWT sets the JWTService instance.
+func (s *Service) SetJWT(j *JWTService) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.jwt = j
+}
+
 // Setup creates the initial admin user and returns a new session.
 func (s *Service) Setup(ctx context.Context, setupCode, username, displayName, password, userAgent, ip string) (*store.User, string, time.Time, error) {
 	if host, _, err := net.SplitHostPort(ip); err == nil {
@@ -179,6 +196,7 @@ func (s *Service) Setup(ctx context.Context, setupCode, username, displayName, p
 		Username:    username,
 		DisplayName: displayName,
 		Role:        "admin",
+		Status:      "active",
 		PassHash:    passHash,
 		MustChange:  false,
 	}
@@ -207,39 +225,57 @@ func (s *Service) Setup(ctx context.Context, setupCode, username, displayName, p
 	return u, token, expiresAt, nil
 }
 
-// Login validates user credentials and establishes a new session.
-func (s *Service) Login(ctx context.Context, username, password, userAgent, ip string) (*store.User, string, time.Time, error) {
+// VerifyUserCredentials validates credentials, enforcing rate limits, dummy hashing on failure, and gating.
+func (s *Service) VerifyUserCredentials(ctx context.Context, username, password, ip string) (*store.User, error) {
 	if host, _, err := net.SplitHostPort(ip); err == nil {
 		ip = host
 	}
 	if !s.rateLimiter.LoginAllowed(username, ip) {
-		return nil, "", time.Time{}, ErrInvalidCredentials
+		return nil, ErrInvalidCredentials
 	}
 
 	u, err := s.store.GetUserByUsername(ctx, username)
 	if err != nil {
 		_, vErr := VerifyPassword(password, dummyPasswordHash)
 		if errors.Is(vErr, ErrBusy) {
-			return nil, "", time.Time{}, ErrBusy
+			return nil, ErrBusy
 		}
 		s.rateLimiter.RecordLoginFailure(username, ip)
-		return nil, "", time.Time{}, ErrInvalidCredentials
+		return nil, ErrInvalidCredentials
 	}
 
 	ok, err := VerifyPassword(password, u.PassHash)
 	if err != nil {
 		if errors.Is(err, ErrBusy) {
-			return nil, "", time.Time{}, ErrBusy
+			return nil, ErrBusy
 		}
 		s.rateLimiter.RecordLoginFailure(username, ip)
-		return nil, "", time.Time{}, ErrInvalidCredentials
+		return nil, ErrInvalidCredentials
 	}
 	if !ok {
 		s.rateLimiter.RecordLoginFailure(username, ip)
-		return nil, "", time.Time{}, ErrInvalidCredentials
+		return nil, ErrInvalidCredentials
 	}
 
 	s.rateLimiter.ResetLoginFailures(username, ip)
+
+	// Login gating: pending or disabled return specific errors only after password is confirmed correct
+	if u.Status == "pending" {
+		return nil, ErrPendingApproval
+	}
+	if u.Status == "disabled" {
+		return nil, ErrUserDisabled
+	}
+
+	return u, nil
+}
+
+// Login validates user credentials and establishes a new session.
+func (s *Service) Login(ctx context.Context, username, password, userAgent, ip string) (*store.User, string, time.Time, error) {
+	u, err := s.VerifyUserCredentials(ctx, username, password, ip)
+	if err != nil {
+		return nil, "", time.Time{}, err
+	}
 
 	token, hash, err := GenerateSessionToken()
 	if err != nil {
@@ -263,10 +299,13 @@ func (s *Service) Login(ctx context.Context, username, password, userAgent, ip s
 }
 
 // AuthenticateSession verifies a session token and returns the corresponding user and session.
-// It also slides the session expiration.
+// It also slides the session expiration and re-checks user status.
 func (s *Service) AuthenticateSession(ctx context.Context, idHash [32]byte) (*store.User, *store.Session, error) {
 	sess, u, err := s.store.GetSession(ctx, idHash)
 	if err != nil {
+		return nil, nil, ErrUnauthorized
+	}
+	if u.Status != "active" {
 		return nil, nil, ErrUnauthorized
 	}
 
@@ -283,7 +322,7 @@ func (s *Service) Logout(ctx context.Context, idHash [32]byte) error {
 	return s.store.DeleteSession(ctx, idHash)
 }
 
-// ChangePassword updates a user's password and revokes all other sessions.
+// ChangePassword updates a user's password and revokes all other sessions and refresh tokens.
 func (s *Service) ChangePassword(ctx context.Context, userID int64, currentPass, newPass string, currentTokenHash [32]byte) error {
 	u, err := s.store.GetUserByID(ctx, userID)
 	if err != nil {
@@ -313,6 +352,7 @@ func (s *Service) ChangePassword(ctx context.Context, userID int64, currentPass,
 		return err
 	}
 
-	// Revoke other sessions
+	// Revoke other sessions and all refresh tokens
+	_ = s.store.DeleteRefreshTokensForUser(ctx, userID)
 	return s.store.DeleteSessionsForUserExcept(ctx, userID, &currentTokenHash)
 }

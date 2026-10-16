@@ -30,6 +30,9 @@ const (
 	PushUpdateWindow   = 1 * time.Hour
 	PushUpdateMaxCount = 10
 
+	RegisterWindow   = 1 * time.Hour
+	RegisterMaxCount = 5
+
 	AuthMinDuration = 300 * time.Millisecond
 
 	MaxRateLimitEntries = 10000
@@ -44,6 +47,7 @@ type RateLimiter struct {
 	setupFailures   map[string][]time.Time // key: ip
 	pairingFailures map[string][]time.Time // key: ip
 	pushUpdates     map[string][]time.Time // key: deviceID
+	registers       map[string][]time.Time // key: ip
 	globalPairing   []time.Time
 	lastPrune       time.Time
 }
@@ -55,6 +59,7 @@ func NewRateLimiter() *RateLimiter {
 		setupFailures:   make(map[string][]time.Time),
 		pairingFailures: make(map[string][]time.Time),
 		pushUpdates:     make(map[string][]time.Time),
+		registers:       make(map[string][]time.Time),
 		lastPrune:       time.Now(),
 	}
 }
@@ -85,6 +90,7 @@ func (rl *RateLimiter) pruneLocked(now time.Time) {
 	rl.pruneMapLocked(rl.setupFailures, SetupWindow, now)
 	rl.pruneMapLocked(rl.pairingFailures, PairingWindow, now)
 	rl.pruneMapLocked(rl.pushUpdates, PushUpdateWindow, now)
+	rl.pruneMapLocked(rl.registers, RegisterWindow, now)
 	rl.globalPairing = pruneTimestamps(rl.globalPairing, PairingWindow, now)
 
 	// If map still exceeds MaxRateLimitEntries after expired prune, evict entries to cap size
@@ -293,6 +299,35 @@ func (rl *RateLimiter) RecordPushTokenUpdate(deviceID string) {
 	}
 
 	rl.pushUpdates[deviceID] = append(pruneTimestamps(rl.pushUpdates[deviceID], PushUpdateWindow, now), now)
+}
+
+// RegisterAllowed checks if an IP is allowed to attempt user registration (max 5 per IP per hour).
+func (rl *RateLimiter) RegisterAllowed(ip string) bool {
+	ip = cleanIP(ip)
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	now := time.Now()
+	if len(rl.registers) >= MaxRateLimitEntries || now.Sub(rl.lastPrune) >= PruneInterval {
+		rl.pruneLocked(now)
+	}
+
+	history := pruneTimestamps(rl.registers[ip], RegisterWindow, now)
+	return len(history) < RegisterMaxCount
+}
+
+// RecordRegister records a user registration attempt from an IP.
+func (rl *RateLimiter) RecordRegister(ip string) {
+	ip = cleanIP(ip)
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	now := time.Now()
+	if len(rl.registers) >= MaxRateLimitEntries || now.Sub(rl.lastPrune) >= PruneInterval {
+		rl.pruneLocked(now)
+	}
+
+	rl.registers[ip] = append(pruneTimestamps(rl.registers[ip], RegisterWindow, now), now)
 }
 
 // EnsureMinDuration sleeps if necessary to ensure authentication responses take at least minDur.

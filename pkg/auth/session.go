@@ -47,6 +47,12 @@ func GetSessionTokenFromRequest(r *http.Request) (string, [32]byte, error) {
 	return c.Value, TokenHash(c.Value), nil
 }
 
+// HasSessionCookie returns true if a non-empty nexus_session cookie is present in the request.
+func HasSessionCookie(r *http.Request) bool {
+	c, err := r.Cookie(SessionCookieName)
+	return err == nil && c.Value != ""
+}
+
 // SetSessionCookie writes the nexus_session cookie to the ResponseWriter.
 func SetSessionCookie(w http.ResponseWriter, r *http.Request, token string, expiresAt time.Time, trustedProxy string) {
 	maxAge := int(time.Until(expiresAt).Seconds())
