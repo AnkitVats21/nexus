@@ -1258,6 +1258,50 @@ func (s *Store) MarkRefreshTokenUsed(ctx context.Context, hash [32]byte, usedAt 
 	return nil
 }
 
+// RotateRefreshToken atomically marks oldHash as used and inserts newRT in the same family.
+// If oldHash was already used (concurrent rotation or replay), it invalidates the entire family and returns ErrNotFound.
+func (s *Store) RotateRefreshToken(ctx context.Context, oldHash [32]byte, usedAt int64, newRT *RefreshToken) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE refresh_tokens SET used_at = ? WHERE id_hash = ? AND used_at IS NULL
+	`, usedAt, oldHash[:])
+	if err != nil {
+		return fmt.Errorf("mark refresh token used: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("rows affected: %w", err)
+	}
+	if n == 0 {
+		_, _ = s.db.ExecContext(ctx, `DELETE FROM refresh_tokens WHERE family_id = ?`, newRT.FamilyID)
+		return ErrNotFound
+	}
+
+	var devID any
+	if newRT.DeviceID != nil && *newRT.DeviceID != "" {
+		devID = *newRT.DeviceID
+	}
+	var userAgent any
+	if newRT.UserAgent != "" {
+		userAgent = newRT.UserAgent
+	}
+	var ip any
+	if newRT.IP != "" {
+		ip = newRT.IP
+	}
+
+	_, err = s.db.ExecContext(ctx, `
+		INSERT INTO refresh_tokens (id_hash, user_id, device_id, family_id, created_at, expires_at, used_at, user_agent, ip)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, newRT.IDHash[:], newRT.UserID, devID, newRT.FamilyID, newRT.CreatedAt, newRT.ExpiresAt, newRT.UsedAt, userAgent, ip)
+	if err != nil {
+		return fmt.Errorf("create rotated refresh token: %w", err)
+	}
+	return nil
+}
+
 // DeleteRefreshTokensByFamily removes all tokens in a family (e.g. on logout or replay detection).
 func (s *Store) DeleteRefreshTokensByFamily(ctx context.Context, familyID string) error {
 	s.mu.Lock()
@@ -1294,4 +1338,21 @@ func (s *Store) BindRefreshFamilyToDevice(ctx context.Context, familyID string, 
 		return fmt.Errorf("bind refresh family to device: %w", err)
 	}
 	return nil
+}
+
+// PruneRefreshTokens deletes rows with expires_at < now.
+// Used rows that have not yet expired are preserved to allow reuse detection.
+func (s *Store) PruneRefreshTokens(ctx context.Context, now int64) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	res, err := s.db.ExecContext(ctx, `DELETE FROM refresh_tokens WHERE expires_at < ?`, now)
+	if err != nil {
+		return 0, fmt.Errorf("prune refresh tokens: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("prune refresh tokens rows affected: %w", err)
+	}
+	return n, nil
 }

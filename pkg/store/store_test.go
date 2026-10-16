@@ -904,3 +904,112 @@ func TestMigration003_UserStatusAndRefreshTokens(t *testing.T) {
 		t.Fatalf("expected DeviceID to be set to NULL after device delete, got %v", *gotRT4.DeviceID)
 	}
 }
+
+func TestPruneRefreshTokens(t *testing.T) {
+	s, cleanup := newTestStore(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	u := &User{
+		Username:    "pruneuser",
+		DisplayName: "Prune User",
+		Role:        "member",
+		Status:      "active",
+		PassHash:    "dummy",
+	}
+	if err := s.CreateUser(ctx, u); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+
+	now := time.Now().UTC().Unix()
+
+	// 1. Expired unused token (expires_at = now - 50, used_at = nil)
+	var h1 [32]byte
+	copy(h1[:], "prune_hash1_____________________")
+	rt1 := &RefreshToken{
+		IDHash:    h1,
+		UserID:    u.ID,
+		FamilyID:  "fam-exp-unused",
+		CreatedAt: now - 100,
+		ExpiresAt: now - 50,
+	}
+	if err := s.CreateRefreshToken(ctx, rt1); err != nil {
+		t.Fatalf("CreateRefreshToken 1: %v", err)
+	}
+
+	// 2. Expired used token (expires_at = now - 50, used_at = now - 60)
+	var h2 [32]byte
+	copy(h2[:], "prune_hash2_____________________")
+	usedAt2 := now - 60
+	rt2 := &RefreshToken{
+		IDHash:    h2,
+		UserID:    u.ID,
+		FamilyID:  "fam-exp-used",
+		CreatedAt: now - 100,
+		ExpiresAt: now - 50,
+		UsedAt:    &usedAt2,
+	}
+	if err := s.CreateRefreshToken(ctx, rt2); err != nil {
+		t.Fatalf("CreateRefreshToken 2: %v", err)
+	}
+
+	// 3. Unexpired unused token (expires_at = now + 1000, used_at = nil)
+	var h3 [32]byte
+	copy(h3[:], "prune_hash3_____________________")
+	rt3 := &RefreshToken{
+		IDHash:    h3,
+		UserID:    u.ID,
+		FamilyID:  "fam-unexp-unused",
+		CreatedAt: now,
+		ExpiresAt: now + 1000,
+	}
+	if err := s.CreateRefreshToken(ctx, rt3); err != nil {
+		t.Fatalf("CreateRefreshToken 3: %v", err)
+	}
+
+	// 4. Unexpired used token (expires_at = now + 1000, used_at = now - 10)
+	// Must be kept because reuse detection requires it until expiry!
+	var h4 [32]byte
+	copy(h4[:], "prune_hash4_____________________")
+	usedAt4 := now - 10
+	rt4 := &RefreshToken{
+		IDHash:    h4,
+		UserID:    u.ID,
+		FamilyID:  "fam-unexp-used",
+		CreatedAt: now - 100,
+		ExpiresAt: now + 1000,
+		UsedAt:    &usedAt4,
+	}
+	if err := s.CreateRefreshToken(ctx, rt4); err != nil {
+		t.Fatalf("CreateRefreshToken 4: %v", err)
+	}
+
+	// Prune with current time
+	pruned, err := s.PruneRefreshTokens(ctx, now)
+	if err != nil {
+		t.Fatalf("PruneRefreshTokens failed: %v", err)
+	}
+	if pruned != 2 {
+		t.Fatalf("expected 2 pruned rows, got %d", pruned)
+	}
+
+	// Verify expired rows (rt1 and rt2) are gone
+	if _, err := s.GetRefreshTokenByHash(ctx, h1); err != ErrNotFound {
+		t.Fatalf("expected ErrNotFound for rt1, got %v", err)
+	}
+	if _, err := s.GetRefreshTokenByHash(ctx, h2); err != ErrNotFound {
+		t.Fatalf("expected ErrNotFound for rt2, got %v", err)
+	}
+
+	// Verify unexpired rows (rt3 and rt4) are still present
+	if _, err := s.GetRefreshTokenByHash(ctx, h3); err != nil {
+		t.Fatalf("expected rt3 to be kept, got err: %v", err)
+	}
+	got4, err := s.GetRefreshTokenByHash(ctx, h4)
+	if err != nil {
+		t.Fatalf("expected rt4 to be kept, got err: %v", err)
+	}
+	if got4.UsedAt == nil || *got4.UsedAt != usedAt4 {
+		t.Fatalf("expected rt4 UsedAt to be preserved")
+	}
+}
