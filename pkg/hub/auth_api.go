@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,6 +23,13 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
+}
+
+func writeErrorCode(w http.ResponseWriter, status int, code string) {
+	writeJSON(w, status, map[string]any{
+		"error": map[string]string{"code": code},
+		"code":  code,
+	})
 }
 
 func readJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
@@ -46,11 +54,48 @@ func (h *Hub) authenticate(r *http.Request) (*store.User, *store.Session, error)
 	if h.auth == nil {
 		return nil, nil, nil
 	}
+
+	authHeader := r.Header.Get("Authorization")
+	if strings.HasPrefix(strings.TrimSpace(authHeader), "Bearer ") {
+		tokenStr := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(authHeader), "Bearer "))
+		if h.jwt == nil {
+			return nil, nil, auth.ErrUnauthorized
+		}
+		claims, err := h.jwt.VerifyToken(tokenStr)
+		if err != nil {
+			return nil, nil, auth.ErrUnauthorized
+		}
+		u, err := h.store.GetUserByID(r.Context(), claims.UserID)
+		if err != nil || u == nil {
+			return nil, nil, auth.ErrUnauthorized
+		}
+		if u.Status != "active" {
+			return nil, nil, auth.ErrUnauthorized
+		}
+		return u, nil, nil
+	}
+
 	_, hash, err := auth.GetSessionTokenFromRequest(r)
 	if err != nil {
 		return nil, nil, auth.ErrUnauthorized
 	}
-	return h.auth.AuthenticateSession(r.Context(), hash)
+	u, sess, err := h.auth.AuthenticateSession(r.Context(), hash)
+	if err != nil || u == nil {
+		return nil, nil, auth.ErrUnauthorized
+	}
+	return u, sess, nil
+}
+
+func (h *Hub) validateCSRFOrBearer(r *http.Request) error {
+	authHeader := r.Header.Get("Authorization")
+	hasBearer := strings.HasPrefix(strings.TrimSpace(authHeader), "Bearer ")
+	hasCookie := auth.HasSessionCookie(r)
+
+	// For a bearer-authenticated request without a session cookie, skip CSRF
+	if hasBearer && !hasCookie {
+		return nil
+	}
+	return auth.ValidateCSRF(r, h.cfg.PublicURL)
 }
 
 func (h *Hub) registerAuthRoutes(mux *http.ServeMux) {
@@ -74,6 +119,31 @@ func (h *Hub) serveHubAPI(w http.ResponseWriter, r *http.Request) {
 		}
 		if r.Method == http.MethodPost {
 			h.handleSetupPost(w, r)
+			return
+		}
+	case path == "/register":
+		if r.Method == http.MethodPost {
+			h.handleRegisterPost(w, r)
+			return
+		}
+	case path == "/auth/token":
+		if r.Method == http.MethodPost {
+			h.handleAuthTokenPost(w, r)
+			return
+		}
+	case path == "/auth/refresh":
+		if r.Method == http.MethodPost {
+			h.handleAuthRefreshPost(w, r)
+			return
+		}
+	case path == "/auth/logout":
+		if r.Method == http.MethodPost {
+			h.handleAuthLogoutPost(w, r)
+			return
+		}
+	case path == "/auth/jwks":
+		if r.Method == http.MethodGet {
+			h.handleAuthJWKSGet(w, r)
 			return
 		}
 	case path == "/login":
@@ -114,6 +184,34 @@ func (h *Hub) serveHubAPI(w http.ResponseWriter, r *http.Request) {
 				h.handleUserResetPost(w, r, id)
 				return
 			}
+		} else if strings.HasSuffix(rest, "/approve") {
+			idStr := strings.TrimSuffix(rest, "/approve")
+			id, err := strconv.ParseInt(idStr, 10, 64)
+			if err == nil && r.Method == http.MethodPost {
+				h.handleUserApprovePost(w, r, id)
+				return
+			}
+		} else if strings.HasSuffix(rest, "/reject") {
+			idStr := strings.TrimSuffix(rest, "/reject")
+			id, err := strconv.ParseInt(idStr, 10, 64)
+			if err == nil && r.Method == http.MethodPost {
+				h.handleUserRejectPost(w, r, id)
+				return
+			}
+		} else if strings.HasSuffix(rest, "/disable") {
+			idStr := strings.TrimSuffix(rest, "/disable")
+			id, err := strconv.ParseInt(idStr, 10, 64)
+			if err == nil && r.Method == http.MethodPost {
+				h.handleUserDisablePost(w, r, id)
+				return
+			}
+		} else if strings.HasSuffix(rest, "/enable") {
+			idStr := strings.TrimSuffix(rest, "/enable")
+			id, err := strconv.ParseInt(idStr, 10, 64)
+			if err == nil && r.Method == http.MethodPost {
+				h.handleUserEnablePost(w, r, id)
+				return
+			}
 		} else {
 			id, err := strconv.ParseInt(rest, 10, 64)
 			if err == nil && r.Method == http.MethodDelete {
@@ -143,6 +241,11 @@ func (h *Hub) serveHubAPI(w http.ResponseWriter, r *http.Request) {
 	case path == "/devices":
 		if r.Method == http.MethodGet {
 			h.handleDevicesGet(w, r)
+			return
+		}
+	case path == "/devices/register":
+		if r.Method == http.MethodPost {
+			h.handleDevicesRegisterPost(w, r)
 			return
 		}
 	case path == "/devices/self/push":
@@ -237,6 +340,293 @@ func (h *Hub) handleSetupPost(w http.ResponseWriter, r *http.Request) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// /hub/api/register
+// ─────────────────────────────────────────────────────────────────────────────
+
+type registerReq struct {
+	Username    string `json:"username"`
+	DisplayName string `json:"display_name"`
+	Password    string `json:"password"`
+}
+
+func (h *Hub) handleRegisterPost(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	defer auth.EnsureMinDuration(start, auth.AuthMinDuration)
+
+	if !h.cfg.signupAllowed() {
+		writeError(w, http.StatusForbidden, "sign-up disabled")
+		return
+	}
+
+	if h.auth == nil {
+		writeError(w, http.StatusBadRequest, "auth not enabled")
+		return
+	}
+
+	needed, err := h.auth.SetupNeeded(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to check setup status")
+		return
+	}
+	if needed {
+		writeError(w, http.StatusConflict, "setup required before registration")
+		return
+	}
+
+	ip := auth.ClientIP(r, h.cfg.TrustedProxy)
+	if !h.auth.RateLimiter().RegisterAllowed(ip) {
+		writeError(w, http.StatusTooManyRequests, "too many registration attempts, please try again later")
+		return
+	}
+
+	var req registerReq
+	if !readJSON(w, r, &req) {
+		return
+	}
+
+	h.auth.RateLimiter().RecordRegister(ip)
+
+	if err := auth.ValidateUsername(req.Username); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := auth.ValidatePassword(req.Password); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	if strings.TrimSpace(req.DisplayName) == "" {
+		req.DisplayName = req.Username
+	}
+
+	passHash, err := auth.HashPassword(req.Password)
+	if err != nil {
+		if errors.Is(err, auth.ErrBusy) {
+			writeError(w, http.StatusServiceUnavailable, "service busy, please try again")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to hash password")
+		return
+	}
+
+	newUser := &store.User{
+		Username:    req.Username,
+		DisplayName: req.DisplayName,
+		Role:        "member",
+		Status:      "pending",
+		PassHash:    passHash,
+		MustChange:  false,
+	}
+
+	if err := h.store.CreateUser(r.Context(), newUser); err != nil {
+		if errors.Is(err, store.ErrConflict) {
+			writeError(w, http.StatusConflict, "username already taken")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to register user")
+		return
+	}
+
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "pending"})
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// /hub/api/auth/token, /refresh, /logout, /jwks
+// ─────────────────────────────────────────────────────────────────────────────
+
+func (h *Hub) handleAuthTokenPost(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	defer auth.EnsureMinDuration(start, auth.AuthMinDuration)
+
+	if h.auth == nil || h.jwt == nil {
+		writeError(w, http.StatusBadRequest, "auth not enabled")
+		return
+	}
+
+	var req loginReq
+	if !readJSON(w, r, &req) {
+		return
+	}
+
+	ip := auth.ClientIP(r, h.cfg.TrustedProxy)
+	u, err := h.auth.VerifyUserCredentials(r.Context(), req.Username, req.Password, ip)
+	if err != nil {
+		if errors.Is(err, auth.ErrBusy) {
+			writeError(w, http.StatusServiceUnavailable, "service busy, please try again")
+			return
+		}
+		if errors.Is(err, auth.ErrPendingApproval) {
+			writeErrorCode(w, http.StatusForbidden, "pending_approval")
+			return
+		}
+		if errors.Is(err, auth.ErrUserDisabled) {
+			writeErrorCode(w, http.StatusForbidden, "disabled")
+			return
+		}
+		writeError(w, http.StatusUnauthorized, "invalid username or password")
+		return
+	}
+
+	tokenStr, _, err := h.jwt.SignUserToken(u)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to sign token")
+		return
+	}
+
+	rawRT, hash, err := auth.GenerateRefreshToken()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to generate refresh token")
+		return
+	}
+
+	famID := auth.GenerateFamilyID()
+	now := time.Now().UTC().Unix()
+	rt := &store.RefreshToken{
+		IDHash:    hash,
+		UserID:    u.ID,
+		FamilyID:  famID,
+		CreatedAt: now,
+		ExpiresAt: now + 30*24*3600,
+		UserAgent: r.UserAgent(),
+		IP:        ip,
+	}
+	if err := h.store.CreateRefreshToken(r.Context(), rt); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to store refresh token")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"access_token":  tokenStr,
+		"token_type":    "Bearer",
+		"expires_in":    900,
+		"refresh_token": rawRT,
+		"user": map[string]any{
+			"id":           u.ID,
+			"username":     u.Username,
+			"display_name": u.DisplayName,
+			"role":         u.Role,
+		},
+	})
+}
+
+type refreshReq struct {
+	RefreshToken string `json:"refresh_token"`
+}
+
+func (h *Hub) handleAuthRefreshPost(w http.ResponseWriter, r *http.Request) {
+	if h.auth == nil || h.jwt == nil {
+		writeError(w, http.StatusBadRequest, "auth not enabled")
+		return
+	}
+
+	var req refreshReq
+	if !readJSON(w, r, &req) {
+		return
+	}
+	if strings.TrimSpace(req.RefreshToken) == "" {
+		writeError(w, http.StatusBadRequest, "refresh_token required")
+		return
+	}
+
+	hash := auth.HashRefreshToken(req.RefreshToken)
+	rt, err := h.store.GetRefreshTokenByHash(r.Context(), hash)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "invalid refresh token")
+		return
+	}
+
+	if rt.UsedAt != nil {
+		// Reuse detected: stolen or replayed refresh token -> delete entire family
+		_ = h.store.DeleteRefreshTokensByFamily(r.Context(), rt.FamilyID)
+		writeError(w, http.StatusUnauthorized, "refresh token reused")
+		return
+	}
+
+	if time.Now().UTC().Unix() > rt.ExpiresAt {
+		writeError(w, http.StatusUnauthorized, "refresh token expired")
+		return
+	}
+
+	u, err := h.store.GetUserByID(r.Context(), rt.UserID)
+	if err != nil || u == nil || u.Status != "active" {
+		writeError(w, http.StatusUnauthorized, "user not active")
+		return
+	}
+
+	now := time.Now().UTC().Unix()
+	if err := h.store.MarkRefreshTokenUsed(r.Context(), hash, now); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to mark refresh token used")
+		return
+	}
+
+	newJWT, _, err := h.jwt.SignUserToken(u)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to sign token")
+		return
+	}
+
+	newRawRT, newHash, err := auth.GenerateRefreshToken()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to generate refresh token")
+		return
+	}
+
+	ip := auth.ClientIP(r, h.cfg.TrustedProxy)
+	newRT := &store.RefreshToken{
+		IDHash:    newHash,
+		UserID:    u.ID,
+		DeviceID:  rt.DeviceID,
+		FamilyID:  rt.FamilyID,
+		CreatedAt: now,
+		ExpiresAt: now + 30*24*3600,
+		UserAgent: r.UserAgent(),
+		IP:        ip,
+	}
+	if err := h.store.CreateRefreshToken(r.Context(), newRT); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to store refresh token")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"access_token":  newJWT,
+		"token_type":    "Bearer",
+		"expires_in":    900,
+		"refresh_token": newRawRT,
+		"user": map[string]any{
+			"id":           u.ID,
+			"username":     u.Username,
+			"display_name": u.DisplayName,
+			"role":         u.Role,
+		},
+	})
+}
+
+func (h *Hub) handleAuthLogoutPost(w http.ResponseWriter, r *http.Request) {
+	var req refreshReq
+	_ = json.NewDecoder(r.Body).Decode(&req)
+
+	if req.RefreshToken != "" && h.store != nil {
+		hash := auth.HashRefreshToken(req.RefreshToken)
+		rt, err := h.store.GetRefreshTokenByHash(r.Context(), hash)
+		if err == nil && rt != nil {
+			_ = h.store.DeleteRefreshTokensByFamily(r.Context(), rt.FamilyID)
+		}
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *Hub) handleAuthJWKSGet(w http.ResponseWriter, r *http.Request) {
+	if h.jwt == nil {
+		writeError(w, http.StatusNotFound, "jwks not available")
+		return
+	}
+
+	w.Header().Set("Cache-Control", "public, max-age=300")
+	writeJSON(w, http.StatusOK, h.jwt.JWKS())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // /hub/api/login
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -269,6 +659,14 @@ func (h *Hub) handleLoginPost(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if errors.Is(err, auth.ErrBusy) {
 			writeError(w, http.StatusServiceUnavailable, "service busy, please try again")
+			return
+		}
+		if errors.Is(err, auth.ErrPendingApproval) {
+			writeErrorCode(w, http.StatusForbidden, "pending_approval")
+			return
+		}
+		if errors.Is(err, auth.ErrUserDisabled) {
+			writeErrorCode(w, http.StatusForbidden, "disabled")
 			return
 		}
 		writeError(w, http.StatusUnauthorized, "invalid username or password")
@@ -332,7 +730,7 @@ func (h *Hub) handleMePasswordPost(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	defer auth.EnsureMinDuration(start, auth.AuthMinDuration)
 
-	if err := auth.ValidateCSRF(r, h.cfg.PublicURL); err != nil {
+	if err := h.validateCSRFOrBearer(r); err != nil {
 		writeError(w, http.StatusForbidden, "csrf validation failed")
 		return
 	}
@@ -348,7 +746,11 @@ func (h *Hub) handleMePasswordPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.auth.ChangePassword(r.Context(), u.ID, req.Current, req.New, sess.IDHash); err != nil {
+	var sessHash [32]byte
+	if sess != nil {
+		sessHash = sess.IDHash
+	}
+	if err := h.auth.ChangePassword(r.Context(), u.ID, req.Current, req.New, sessHash); err != nil {
 		if errors.Is(err, auth.ErrBusy) {
 			writeError(w, http.StatusServiceUnavailable, "service busy, please try again")
 			return
@@ -379,7 +781,13 @@ func (h *Hub) handleUsersGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	users, err := h.store.ListUsers(r.Context())
+	statusFilter := r.URL.Query().Get("status")
+	var users []*store.User
+	if statusFilter != "" {
+		users, err = h.store.ListUsers(r.Context(), statusFilter)
+	} else {
+		users, err = h.store.ListUsers(r.Context())
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to list users")
 		return
@@ -397,7 +805,7 @@ type createUserReq struct {
 }
 
 func (h *Hub) handleUsersPost(w http.ResponseWriter, r *http.Request) {
-	if err := auth.ValidateCSRF(r, h.cfg.PublicURL); err != nil {
+	if err := h.validateCSRFOrBearer(r); err != nil {
 		writeError(w, http.StatusForbidden, "csrf validation failed")
 		return
 	}
@@ -448,6 +856,7 @@ func (h *Hub) handleUsersPost(w http.ResponseWriter, r *http.Request) {
 		Username:    req.Username,
 		DisplayName: req.DisplayName,
 		Role:        req.Role,
+		Status:      "active",
 		PassHash:    passHash,
 		MustChange:  true,
 	}
@@ -468,7 +877,7 @@ func (h *Hub) handleUsersPost(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Hub) handleUserResetPost(w http.ResponseWriter, r *http.Request, targetID int64) {
-	if err := auth.ValidateCSRF(r, h.cfg.PublicURL); err != nil {
+	if err := h.validateCSRFOrBearer(r); err != nil {
 		writeError(w, http.StatusForbidden, "csrf validation failed")
 		return
 	}
@@ -513,8 +922,9 @@ func (h *Hub) handleUserResetPost(w http.ResponseWriter, r *http.Request, target
 		return
 	}
 
-	// Revoke all sessions for the target user
+	// Revoke all sessions and refresh tokens for the target user
 	_ = h.store.DeleteSessionsForUserExcept(r.Context(), targetUser.ID, nil)
+	_ = h.store.DeleteRefreshTokensForUser(r.Context(), targetUser.ID)
 
 	writeJSON(w, http.StatusOK, map[string]string{
 		"temp_password": tempPassword,
@@ -522,7 +932,7 @@ func (h *Hub) handleUserResetPost(w http.ResponseWriter, r *http.Request, target
 }
 
 func (h *Hub) handleUserDelete(w http.ResponseWriter, r *http.Request, targetID int64) {
-	if err := auth.ValidateCSRF(r, h.cfg.PublicURL); err != nil {
+	if err := h.validateCSRFOrBearer(r); err != nil {
 		writeError(w, http.StatusForbidden, "csrf validation failed")
 		return
 	}
@@ -557,7 +967,7 @@ func (h *Hub) handleUserDelete(w http.ResponseWriter, r *http.Request, targetID 
 	}
 
 	if targetUser.Role == "admin" {
-		adminCount, err := h.store.CountAdmins(r.Context())
+		adminCount, err := h.store.CountActiveAdmins(r.Context())
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to count admins")
 			return
@@ -570,6 +980,185 @@ func (h *Hub) handleUserDelete(w http.ResponseWriter, r *http.Request, targetID 
 
 	if err := h.store.DeleteUser(r.Context(), targetID); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to delete user")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func (h *Hub) handleUserApprovePost(w http.ResponseWriter, r *http.Request, targetID int64) {
+	if err := h.validateCSRFOrBearer(r); err != nil {
+		writeError(w, http.StatusForbidden, "csrf validation failed")
+		return
+	}
+
+	u, _, err := h.authenticate(r)
+	if err != nil || u == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if u.MustChange {
+		writeError(w, http.StatusForbidden, "password change required")
+		return
+	}
+	if u.Role != "admin" {
+		writeError(w, http.StatusForbidden, "admin role required")
+		return
+	}
+
+	targetUser, err := h.store.GetUserByID(r.Context(), targetID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "user not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to get user")
+		return
+	}
+
+	if targetUser.Status != "pending" {
+		writeError(w, http.StatusBadRequest, "user is not pending approval")
+		return
+	}
+
+	if err := h.store.UpdateUserStatus(r.Context(), targetID, "active"); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to approve user")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func (h *Hub) handleUserRejectPost(w http.ResponseWriter, r *http.Request, targetID int64) {
+	if err := h.validateCSRFOrBearer(r); err != nil {
+		writeError(w, http.StatusForbidden, "csrf validation failed")
+		return
+	}
+
+	u, _, err := h.authenticate(r)
+	if err != nil || u == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if u.MustChange {
+		writeError(w, http.StatusForbidden, "password change required")
+		return
+	}
+	if u.Role != "admin" {
+		writeError(w, http.StatusForbidden, "admin role required")
+		return
+	}
+
+	targetUser, err := h.store.GetUserByID(r.Context(), targetID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "user not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to get user")
+		return
+	}
+
+	if targetUser.Status != "pending" {
+		writeError(w, http.StatusBadRequest, "can only reject pending users")
+		return
+	}
+
+	if err := h.store.DeleteUser(r.Context(), targetID); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to reject user")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func (h *Hub) handleUserDisablePost(w http.ResponseWriter, r *http.Request, targetID int64) {
+	if err := h.validateCSRFOrBearer(r); err != nil {
+		writeError(w, http.StatusForbidden, "csrf validation failed")
+		return
+	}
+
+	u, _, err := h.authenticate(r)
+	if err != nil || u == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if u.MustChange {
+		writeError(w, http.StatusForbidden, "password change required")
+		return
+	}
+	if u.Role != "admin" {
+		writeError(w, http.StatusForbidden, "admin role required")
+		return
+	}
+
+	targetUser, err := h.store.GetUserByID(r.Context(), targetID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "user not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to get user")
+		return
+	}
+
+	if targetUser.Role == "admin" && targetUser.Status == "active" {
+		activeCount, err := h.store.CountActiveAdmins(r.Context())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to count admins")
+			return
+		}
+		if activeCount <= 1 {
+			writeError(w, http.StatusBadRequest, "cannot disable last active admin")
+			return
+		}
+	}
+
+	if err := h.store.UpdateUserStatus(r.Context(), targetID, "disabled"); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to disable user")
+		return
+	}
+
+	// Disable deletes the user's sessions and refresh tokens, and closes their live edge connections
+	_ = h.store.DeleteSessionsForUserExcept(r.Context(), targetID, nil)
+	_ = h.store.DeleteRefreshTokensForUser(r.Context(), targetID)
+	h.closeEdgesForUser(targetID)
+
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func (h *Hub) handleUserEnablePost(w http.ResponseWriter, r *http.Request, targetID int64) {
+	if err := h.validateCSRFOrBearer(r); err != nil {
+		writeError(w, http.StatusForbidden, "csrf validation failed")
+		return
+	}
+
+	u, _, err := h.authenticate(r)
+	if err != nil || u == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if u.MustChange {
+		writeError(w, http.StatusForbidden, "password change required")
+		return
+	}
+	if u.Role != "admin" {
+		writeError(w, http.StatusForbidden, "admin role required")
+		return
+	}
+
+	_, err = h.store.GetUserByID(r.Context(), targetID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "user not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to get user")
+		return
+	}
+
+	if err := h.store.UpdateUserStatus(r.Context(), targetID, "active"); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to enable user")
 		return
 	}
 
@@ -604,7 +1193,7 @@ func (h *Hub) handlePairingGet(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Hub) handlePairingPost(w http.ResponseWriter, r *http.Request) {
-	if err := auth.ValidateCSRF(r, h.cfg.PublicURL); err != nil {
+	if err := h.validateCSRFOrBearer(r); err != nil {
 		writeError(w, http.StatusForbidden, "csrf validation failed")
 		return
 	}
@@ -652,7 +1241,7 @@ func (h *Hub) handlePairingPost(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Hub) handlePairingDelete(w http.ResponseWriter, r *http.Request) {
-	if err := auth.ValidateCSRF(r, h.cfg.PublicURL); err != nil {
+	if err := h.validateCSRFOrBearer(r); err != nil {
 		writeError(w, http.StatusForbidden, "csrf validation failed")
 		return
 	}
@@ -675,7 +1264,7 @@ func (h *Hub) handlePairingDelete(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Hub) handlePairingCodeDelete(w http.ResponseWriter, r *http.Request, code string) {
-	if err := auth.ValidateCSRF(r, h.cfg.PublicURL); err != nil {
+	if err := h.validateCSRFOrBearer(r); err != nil {
 		writeError(w, http.StatusForbidden, "csrf validation failed")
 		return
 	}
@@ -718,6 +1307,119 @@ type deviceResponse struct {
 	ConnectedS int64  `json:"connected_s"`
 	Owner      string `json:"owner"`
 	Legacy     bool   `json:"legacy,omitempty"`
+}
+
+type deviceRegisterReq struct {
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	Kind          string `json:"kind"`
+	RefreshFamily string `json:"refresh_family"`
+}
+
+func (h *Hub) handleDevicesRegisterPost(w http.ResponseWriter, r *http.Request) {
+	if err := h.validateCSRFOrBearer(r); err != nil {
+		writeError(w, http.StatusForbidden, "csrf validation failed")
+		return
+	}
+
+	u, _, err := h.authenticate(r)
+	if err != nil || u == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if u.MustChange {
+		writeError(w, http.StatusForbidden, "password change required")
+		return
+	}
+
+	var req deviceRegisterReq
+	if !readJSON(w, r, &req) {
+		return
+	}
+
+	if req.Kind != "android" {
+		writeError(w, http.StatusBadRequest, "invalid kind: must be android")
+		return
+	}
+
+	id := req.ID
+	if id == "" {
+		var b [6]byte
+		if _, err := rand.Read(b[:]); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to generate device id")
+			return
+		}
+		id = fmt.Sprintf("nexus-app-%x", b[:])
+	} else {
+		if len(id) > 64 {
+			writeError(w, http.StatusBadRequest, "device id too long: max 64 characters")
+			return
+		}
+		for _, r := range id {
+			if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-') {
+				writeError(w, http.StatusBadRequest, "invalid device id format: alphanumeric and hyphens only")
+				return
+			}
+		}
+	}
+
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		writeError(w, http.StatusBadRequest, "device name cannot be empty")
+		return
+	}
+	if len(name) > 64 {
+		writeError(w, http.StatusBadRequest, "device name too long: max 64 characters")
+		return
+	}
+
+	existing, err := h.auth.Store().GetDeviceByID(r.Context(), id)
+	if err == nil && existing != nil {
+		if existing.OwnerID != u.ID {
+			writeError(w, http.StatusConflict, "device registered to another user")
+			return
+		}
+		rawToken := auth.GenerateDeviceToken()
+		existing.TokenHash = auth.HashDeviceToken(rawToken)
+		existing.Name = name
+		existing.LastSeen = time.Now().UTC().Unix()
+		if err := h.auth.Store().UpsertDevice(r.Context(), existing); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to update device")
+			return
+		}
+		if req.RefreshFamily != "" {
+			_ = h.auth.Store().BindRefreshFamilyToDevice(r.Context(), req.RefreshFamily, id)
+		}
+		writeJSON(w, http.StatusOK, map[string]string{
+			"device_token": rawToken,
+		})
+		return
+	} else if !errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusInternalServerError, "failed to query device")
+		return
+	}
+
+	rawToken := auth.GenerateDeviceToken()
+	now := time.Now().UTC().Unix()
+	newDev := &store.Device{
+		ID:        id,
+		OwnerID:   u.ID,
+		Name:      name,
+		Kind:      "android",
+		TokenHash: auth.HashDeviceToken(rawToken),
+		CreatedAt: now,
+		LastSeen:  now,
+	}
+	if err := h.auth.Store().UpsertDevice(r.Context(), newDev); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to create device")
+		return
+	}
+	if req.RefreshFamily != "" {
+		_ = h.auth.Store().BindRefreshFamilyToDevice(r.Context(), req.RefreshFamily, id)
+	}
+	writeJSON(w, http.StatusOK, map[string]string{
+		"device_token": rawToken,
+	})
 }
 
 func (h *Hub) handleDevicesGet(w http.ResponseWriter, r *http.Request) {
@@ -827,7 +1529,7 @@ type patchDeviceReq struct {
 }
 
 func (h *Hub) handleDevicePatch(w http.ResponseWriter, r *http.Request, id string) {
-	if err := auth.ValidateCSRF(r, h.cfg.PublicURL); err != nil {
+	if err := h.validateCSRFOrBearer(r); err != nil {
 		writeError(w, http.StatusForbidden, "csrf validation failed")
 		return
 	}
@@ -889,7 +1591,7 @@ func (h *Hub) handleDevicePatch(w http.ResponseWriter, r *http.Request, id strin
 }
 
 func (h *Hub) handleDeviceDelete(w http.ResponseWriter, r *http.Request, id string) {
-	if err := auth.ValidateCSRF(r, h.cfg.PublicURL); err != nil {
+	if err := h.validateCSRFOrBearer(r); err != nil {
 		writeError(w, http.StatusForbidden, "csrf validation failed")
 		return
 	}
@@ -1056,7 +1758,7 @@ type adminPushTestReq struct {
 }
 
 func (h *Hub) handleAdminPushTest(w http.ResponseWriter, r *http.Request) {
-	if err := auth.ValidateCSRF(r, h.cfg.PublicURL); err != nil {
+	if err := h.validateCSRFOrBearer(r); err != nil {
 		writeError(w, http.StatusForbidden, "csrf validation failed")
 		return
 	}

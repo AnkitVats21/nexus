@@ -66,6 +66,8 @@ func main() {
 	publicURL := flag.String("public-url", "", "public URL of the hub for CSRF and external links")
 	fcmCredentials := flag.String("fcm-credentials", "", "path to Firebase service account JSON file for push notifications")
 	fcmProject := flag.String("fcm-project", "", "Firebase project ID for push notifications")
+	allowSignup := flag.Bool("allow-signup", true, "allow user self-registration at /hub/api/register")
+	jwtKeyFile := flag.String("jwt-key", filepath.Join(home, ".config", "nexus", "jwt_ed25519.pem"), "Ed25519 private key PEM file for JWT signing")
 	var allowOrigins stringSlice
 	flag.Var(&allowOrigins, "allow-origin", "repeatable allowed Origin for browser WebSocket connections (e.g. http://localhost:5173)")
 	debug := flag.Bool("debug", false, "debug logging")
@@ -173,7 +175,8 @@ func main() {
 		GeminiKey: geminiKey, Uplink: *uplink, MCP: mcp, Tracks: tracks, Cache: cache,
 		DBPath: *dbPath, TrustedProxy: *trustedProxy, PublicURL: *publicURL, AllowedOrigins: allowOrigins,
 		LegacyTokens: legacyTokens, PairingPepperPath: *pairingPepperFile,
-		FCMCredentials: *fcmCredentials, FCMProject: *fcmProject})
+		FCMCredentials: *fcmCredentials, FCMProject: *fcmProject,
+		AllowSignup: allowSignup, JWTKeyPath: *jwtKeyFile})
 	if err != nil {
 		log.Error("Failed to initialize hub", "err", err)
 		os.Exit(1)

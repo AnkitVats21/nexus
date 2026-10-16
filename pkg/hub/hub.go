@@ -18,6 +18,8 @@ package hub
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -112,6 +114,13 @@ type Config struct {
 	FCMCredentials string
 	FCMProject     string
 	PushSender     push.Sender
+
+	// User self-registration (flag --allow-signup, default true).
+	AllowSignup *bool
+	// Path to Ed25519 private key PEM for signing JWT access tokens (flag --jwt-key).
+	JWTKeyPath string
+	// Pre-configured JWT service (optional, for tests).
+	JWT *auth.JWTService
 }
 
 func (c Config) legacyTokensEnabled() bool {
@@ -119,6 +128,13 @@ func (c Config) legacyTokensEnabled() bool {
 		return *c.LegacyTokens
 	}
 	return !c.DisableLegacyTokens
+}
+
+func (c Config) signupAllowed() bool {
+	if c.AllowSignup != nil {
+		return *c.AllowSignup
+	}
+	return true
 }
 
 type Hub struct {
@@ -138,6 +154,7 @@ type Hub struct {
 
 	store *store.Store
 	auth  *auth.Service
+	jwt   *auth.JWTService
 
 	pushSender          push.Sender
 	fallbackRateLimiter *auth.RateLimiter
@@ -311,6 +328,24 @@ func New(cfg Config) (*Hub, error) {
 		h.log.Info("push off")
 	}
 
+	if cfg.JWT != nil {
+		h.jwt = cfg.JWT
+	} else if cfg.JWTKeyPath != "" {
+		priv, err := auth.LoadOrGenerateJWTKey(cfg.JWTKeyPath)
+		if err != nil {
+			return nil, fmt.Errorf("load or generate jwt key: %w", err)
+		}
+		h.jwt = auth.NewJWTService(priv)
+		h.log.Info("JWT service initialized", "key_id", h.jwt.KeyID(), "key_file", cfg.JWTKeyPath)
+	} else if !cfg.NoAuth {
+		_, priv, _ := ed25519.GenerateKey(rand.Reader)
+		h.jwt = auth.NewJWTService(priv)
+	}
+
+	if h.auth != nil && h.jwt != nil {
+		h.auth.SetJWT(h.jwt)
+	}
+
 	return h, nil
 }
 
@@ -466,6 +501,11 @@ func (h *Hub) serveEdge(w http.ResponseWriter, r *http.Request) {
 				}
 				owner, _ := h.auth.Store().GetUserByID(r.Context(), dev.OwnerID)
 				if owner != nil {
+					if owner.Status == "disabled" {
+						h.writeNow(conn, map[string]any{"type": "rejected", "reason": "disabled"})
+						conn.Close(closeRejected, "disabled")
+						return
+					}
 					ownerName = owner.DisplayName
 					ownerID = owner.ID
 				}
@@ -732,6 +772,26 @@ func (h *Hub) dropBoard(b *edge, err error) {
 			br.conn.Close(closeBoardOffline, "board offline")
 			br.cancel()
 		}()
+	}
+}
+
+func (h *Hub) closeEdgesForUser(userID int64) {
+	h.mu.Lock()
+	var edgesToClose []*edge
+	for _, e := range h.edges {
+		if e.ownerID == userID {
+			edgesToClose = append(edgesToClose, e)
+		}
+	}
+	h.mu.Unlock()
+
+	for _, e := range edgesToClose {
+		if e.cancel != nil {
+			e.cancel()
+		}
+		if e.conn != nil {
+			_ = e.conn.Close(closeRejected, "user disabled")
+		}
 	}
 }
 
