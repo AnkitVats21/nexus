@@ -190,6 +190,15 @@ func (s *Store) CountAdmins(ctx context.Context) (int, error) {
 	return count, err
 }
 
+// CountActiveAdmins returns the number of active admin users.
+func (s *Store) CountActiveAdmins(ctx context.Context) (int, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var count int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM users WHERE role = 'admin' AND status = 'active'`).Scan(&count)
+	return count, err
+}
+
 // CreateUser inserts a new user record.
 func (s *Store) CreateUser(ctx context.Context, u *User) error {
 	s.mu.Lock()
@@ -202,6 +211,9 @@ func (s *Store) CreateUser(ctx context.Context, u *User) error {
 	if u.UpdatedAt == 0 {
 		u.UpdatedAt = now
 	}
+	if u.Status == "" {
+		u.Status = "active"
+	}
 
 	mustChangeInt := 0
 	if u.MustChange {
@@ -209,9 +221,9 @@ func (s *Store) CreateUser(ctx context.Context, u *User) error {
 	}
 
 	res, err := s.db.ExecContext(ctx, `
-		INSERT INTO users (username, display_name, role, pass_hash, must_change, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
-	`, u.Username, u.DisplayName, u.Role, u.PassHash, mustChangeInt, u.CreatedAt, u.UpdatedAt)
+		INSERT INTO users (username, display_name, role, status, pass_hash, must_change, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	`, u.Username, u.DisplayName, u.Role, u.Status, u.PassHash, mustChangeInt, u.CreatedAt, u.UpdatedAt)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
 			return ErrConflict
@@ -235,9 +247,9 @@ func (s *Store) GetUserByID(ctx context.Context, id int64) (*User, error) {
 	var u User
 	var mustChangeInt int
 	err := s.db.QueryRowContext(ctx, `
-		SELECT id, username, display_name, role, pass_hash, must_change, created_at, updated_at
+		SELECT id, username, display_name, role, status, pass_hash, must_change, created_at, updated_at
 		FROM users WHERE id = ?
-	`, id).Scan(&u.ID, &u.Username, &u.DisplayName, &u.Role, &u.PassHash, &mustChangeInt, &u.CreatedAt, &u.UpdatedAt)
+	`, id).Scan(&u.ID, &u.Username, &u.DisplayName, &u.Role, &u.Status, &u.PassHash, &mustChangeInt, &u.CreatedAt, &u.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
@@ -256,9 +268,9 @@ func (s *Store) GetUserByUsername(ctx context.Context, username string) (*User, 
 	var u User
 	var mustChangeInt int
 	err := s.db.QueryRowContext(ctx, `
-		SELECT id, username, display_name, role, pass_hash, must_change, created_at, updated_at
+		SELECT id, username, display_name, role, status, pass_hash, must_change, created_at, updated_at
 		FROM users WHERE username = ?
-	`, username).Scan(&u.ID, &u.Username, &u.DisplayName, &u.Role, &u.PassHash, &mustChangeInt, &u.CreatedAt, &u.UpdatedAt)
+	`, username).Scan(&u.ID, &u.Username, &u.DisplayName, &u.Role, &u.Status, &u.PassHash, &mustChangeInt, &u.CreatedAt, &u.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
@@ -269,15 +281,23 @@ func (s *Store) GetUserByUsername(ctx context.Context, username string) (*User, 
 	return &u, nil
 }
 
-// ListUsers returns all users sorted by ID.
-func (s *Store) ListUsers(ctx context.Context) ([]*User, error) {
+// ListUsers returns all users, optionally filtered by status (if specified).
+func (s *Store) ListUsers(ctx context.Context, status ...string) ([]*User, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, username, display_name, role, must_change, created_at, updated_at
-		FROM users ORDER BY id ASC
-	`)
+	query := `
+		SELECT id, username, display_name, role, status, must_change, created_at, updated_at
+		FROM users
+	`
+	var args []any
+	if len(status) > 0 && status[0] != "" {
+		query += ` WHERE status = ?`
+		args = append(args, status[0])
+	}
+	query += ` ORDER BY id ASC`
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list users query: %w", err)
 	}
@@ -287,13 +307,35 @@ func (s *Store) ListUsers(ctx context.Context) ([]*User, error) {
 	for rows.Next() {
 		var u User
 		var mustChangeInt int
-		if err := rows.Scan(&u.ID, &u.Username, &u.DisplayName, &u.Role, &mustChangeInt, &u.CreatedAt, &u.UpdatedAt); err != nil {
+		if err := rows.Scan(&u.ID, &u.Username, &u.DisplayName, &u.Role, &u.Status, &mustChangeInt, &u.CreatedAt, &u.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan user: %w", err)
 		}
 		u.MustChange = (mustChangeInt != 0)
 		users = append(users, &u)
 	}
 	return users, rows.Err()
+}
+
+// UpdateUserStatus updates the status of a user ('pending', 'active', 'disabled').
+func (s *Store) UpdateUserStatus(ctx context.Context, id int64, status string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := time.Now().UTC().Unix()
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE users SET status = ?, updated_at = ? WHERE id = ?
+	`, status, now, id)
+	if err != nil {
+		return fmt.Errorf("update user status: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("rows affected: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // UpdateUserPassword updates the password hash and must_change flag for a user.
@@ -406,13 +448,13 @@ func (s *Store) GetSession(ctx context.Context, idHash [32]byte) (*Session, *Use
 
 	err := s.db.QueryRowContext(ctx, `
 		SELECT s.id_hash, s.user_id, s.created_at, s.expires_at, s.user_agent, s.ip,
-		       u.id, u.username, u.display_name, u.role, u.pass_hash, u.must_change, u.created_at, u.updated_at
+		       u.id, u.username, u.display_name, u.role, u.status, u.pass_hash, u.must_change, u.created_at, u.updated_at
 		FROM sessions s
 		JOIN users u ON s.user_id = u.id
 		WHERE s.id_hash = ? AND s.expires_at > ?
 	`, idHash[:], now).Scan(
 		&hashBytes, &sess.UserID, &sess.CreatedAt, &sess.ExpiresAt, &ua, &ip,
-		&u.ID, &u.Username, &u.DisplayName, &u.Role, &u.PassHash, &mustChangeInt, &u.CreatedAt, &u.UpdatedAt,
+		&u.ID, &u.Username, &u.DisplayName, &u.Role, &u.Status, &u.PassHash, &mustChangeInt, &u.CreatedAt, &u.UpdatedAt,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -1113,6 +1155,143 @@ func (s *Store) MarkPushFailIf(ctx context.Context, deviceID string, token strin
 	}
 	if n == 0 {
 		return ErrNotFound
+	}
+	return nil
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Refresh Tokens
+// ─────────────────────────────────────────────────────────────────────────────
+
+// CreateRefreshToken inserts a new refresh token record.
+func (s *Store) CreateRefreshToken(ctx context.Context, rt *RefreshToken) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := time.Now().UTC().Unix()
+	if rt.CreatedAt == 0 {
+		rt.CreatedAt = now
+	}
+
+	var devID any
+	if rt.DeviceID != nil && *rt.DeviceID != "" {
+		devID = *rt.DeviceID
+	}
+
+	var usedAt any
+	if rt.UsedAt != nil {
+		usedAt = *rt.UsedAt
+	}
+
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO refresh_tokens (id_hash, user_id, device_id, family_id, created_at, expires_at, used_at, user_agent, ip)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, rt.IDHash[:], rt.UserID, devID, rt.FamilyID, rt.CreatedAt, rt.ExpiresAt, usedAt, rt.UserAgent, rt.IP)
+	if err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			return ErrConflict
+		}
+		return fmt.Errorf("insert refresh token: %w", err)
+	}
+	return nil
+}
+
+// GetRefreshTokenByHash retrieves a refresh token by its sha256 hash.
+func (s *Store) GetRefreshTokenByHash(ctx context.Context, hash [32]byte) (*RefreshToken, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var rt RefreshToken
+	var hashBytes []byte
+	var devID sql.NullString
+	var usedAt sql.NullInt64
+	var userAgent, ip sql.NullString
+
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id_hash, user_id, device_id, family_id, created_at, expires_at, used_at, user_agent, ip
+		FROM refresh_tokens WHERE id_hash = ?
+	`, hash[:]).Scan(&hashBytes, &rt.UserID, &devID, &rt.FamilyID, &rt.CreatedAt, &rt.ExpiresAt, &usedAt, &userAgent, &ip)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("get refresh token: %w", err)
+	}
+
+	copy(rt.IDHash[:], hashBytes)
+
+	if devID.Valid {
+		v := devID.String
+		rt.DeviceID = &v
+	}
+	if usedAt.Valid {
+		v := usedAt.Int64
+		rt.UsedAt = &v
+	}
+	if userAgent.Valid {
+		rt.UserAgent = userAgent.String
+	}
+	if ip.Valid {
+		rt.IP = ip.String
+	}
+	return &rt, nil
+}
+
+// MarkRefreshTokenUsed marks a refresh token as rotated with the given timestamp.
+func (s *Store) MarkRefreshTokenUsed(ctx context.Context, hash [32]byte, usedAt int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE refresh_tokens SET used_at = ? WHERE id_hash = ? AND used_at IS NULL
+	`, usedAt, hash[:])
+	if err != nil {
+		return fmt.Errorf("mark refresh token used: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("rows affected: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// DeleteRefreshTokensByFamily removes all tokens in a family (e.g. on logout or replay detection).
+func (s *Store) DeleteRefreshTokensByFamily(ctx context.Context, familyID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, err := s.db.ExecContext(ctx, `DELETE FROM refresh_tokens WHERE family_id = ?`, familyID)
+	if err != nil {
+		return fmt.Errorf("delete refresh tokens by family: %w", err)
+	}
+	return nil
+}
+
+// DeleteRefreshTokensForUser removes all refresh tokens for a user (e.g. on disable or password change).
+func (s *Store) DeleteRefreshTokensForUser(ctx context.Context, userID int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, err := s.db.ExecContext(ctx, `DELETE FROM refresh_tokens WHERE user_id = ?`, userID)
+	if err != nil {
+		return fmt.Errorf("delete refresh tokens for user: %w", err)
+	}
+	return nil
+}
+
+// BindRefreshFamilyToDevice binds a refresh family to a device ID.
+func (s *Store) BindRefreshFamilyToDevice(ctx context.Context, familyID string, deviceID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE refresh_tokens SET device_id = ? WHERE family_id = ?
+	`, deviceID, familyID)
+	if err != nil {
+		return fmt.Errorf("bind refresh family to device: %w", err)
 	}
 	return nil
 }

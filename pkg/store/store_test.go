@@ -728,3 +728,179 @@ func TestPushTokensConditionalOperations(t *testing.T) {
 		t.Fatalf("expected ErrNotFound after deleting tokenB, got %v", err)
 	}
 }
+
+func TestMigration003_UserStatusAndRefreshTokens(t *testing.T) {
+	s, cleanup := newTestStore(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	// 1. User status defaults to 'active'
+	_ = s.CreateUser(ctx, &User{Username: "u_active", DisplayName: "Active User", Role: "member", PassHash: "h"})
+	u1, err := s.GetUserByUsername(ctx, "u_active")
+	if err != nil {
+		t.Fatalf("GetUserByUsername failed: %v", err)
+	}
+	if u1.Status != "active" {
+		t.Fatalf("expected status 'active', got %q", u1.Status)
+	}
+
+	// 2. Pending and Disabled user creation & update
+	_ = s.CreateUser(ctx, &User{Username: "u_pending", DisplayName: "Pending User", Role: "member", Status: "pending", PassHash: "h"})
+	uPending, _ := s.GetUserByUsername(ctx, "u_pending")
+	if uPending.Status != "pending" {
+		t.Fatalf("expected status 'pending', got %q", uPending.Status)
+	}
+
+	if err := s.UpdateUserStatus(ctx, uPending.ID, "active"); err != nil {
+		t.Fatalf("UpdateUserStatus to active failed: %v", err)
+	}
+	uPending, _ = s.GetUserByID(ctx, uPending.ID)
+	if uPending.Status != "active" {
+		t.Fatalf("expected updated status 'active', got %q", uPending.Status)
+	}
+
+	// 3. Status filter in ListUsers
+	_ = s.CreateUser(ctx, &User{Username: "u_pend2", DisplayName: "P2", Role: "member", Status: "pending", PassHash: "h"})
+	allUsers, _ := s.ListUsers(ctx)
+	if len(allUsers) < 3 {
+		t.Fatalf("expected at least 3 users, got %d", len(allUsers))
+	}
+	pendingUsers, _ := s.ListUsers(ctx, "pending")
+	if len(pendingUsers) != 1 || pendingUsers[0].Username != "u_pend2" {
+		t.Fatalf("expected exactly 1 pending user 'u_pend2', got %v", pendingUsers)
+	}
+
+	// 4. CountActiveAdmins
+	_ = s.CreateUser(ctx, &User{Username: "adm1", DisplayName: "Admin 1", Role: "admin", Status: "active", PassHash: "h"})
+	_ = s.CreateUser(ctx, &User{Username: "adm2", DisplayName: "Admin 2", Role: "admin", Status: "disabled", PassHash: "h"})
+	activeAdmins, err := s.CountActiveAdmins(ctx)
+	if err != nil {
+		t.Fatalf("CountActiveAdmins failed: %v", err)
+	}
+	if activeAdmins != 1 {
+		t.Fatalf("expected 1 active admin, got %d", activeAdmins)
+	}
+
+	// 5. Refresh token lifecycle & rotation
+	devID := "dev-rt-1"
+	var devTok1 [32]byte
+	copy(devTok1[:], "devtok1_________________________")
+	if err := s.UpsertDevice(ctx, &Device{ID: devID, OwnerID: u1.ID, Name: "D", Kind: "android", TokenHash: devTok1}); err != nil {
+		t.Fatalf("UpsertDevice 1 failed: %v", err)
+	}
+
+	var tok1Hash [32]byte
+	copy(tok1Hash[:], "hash1___________________________")
+	now := time.Now().UTC().Unix()
+	devPtr := devID
+	rt1 := &RefreshToken{
+		IDHash:    tok1Hash,
+		UserID:    u1.ID,
+		DeviceID:  &devPtr,
+		FamilyID:  "fam-123",
+		CreatedAt: now,
+		ExpiresAt: now + 3600,
+		UserAgent: "TestAgent",
+		IP:        "127.0.0.1",
+	}
+	if err := s.CreateRefreshToken(ctx, rt1); err != nil {
+		t.Fatalf("CreateRefreshToken failed: %v", err)
+	}
+
+	gotRT, err := s.GetRefreshTokenByHash(ctx, tok1Hash)
+	if err != nil {
+		t.Fatalf("GetRefreshTokenByHash failed: %v", err)
+	}
+	if gotRT.FamilyID != "fam-123" || gotRT.UsedAt != nil || gotRT.DeviceID == nil || *gotRT.DeviceID != devID {
+		t.Fatalf("unexpected gotRT: %+v", gotRT)
+	}
+
+	// Mark used
+	usedAt := now + 10
+	if err := s.MarkRefreshTokenUsed(ctx, tok1Hash, usedAt); err != nil {
+		t.Fatalf("MarkRefreshTokenUsed failed: %v", err)
+	}
+	gotRT, _ = s.GetRefreshTokenByHash(ctx, tok1Hash)
+	if gotRT.UsedAt == nil || *gotRT.UsedAt != usedAt {
+		t.Fatalf("expected UsedAt == %d, got %v", usedAt, gotRT.UsedAt)
+	}
+
+	// Marking used again returns ErrNotFound (atomic rotation)
+	if err := s.MarkRefreshTokenUsed(ctx, tok1Hash, usedAt+10); err != ErrNotFound {
+		t.Fatalf("expected ErrNotFound marking already-used token, got %v", err)
+	}
+
+	// 6. Bind family to device
+	if err := s.BindRefreshFamilyToDevice(ctx, "fam-123", "dev-rt-1"); err != nil {
+		t.Fatalf("BindRefreshFamilyToDevice failed: %v", err)
+	}
+
+	// 7. Delete by family
+	var tok2Hash [32]byte
+	copy(tok2Hash[:], "hash2___________________________")
+	rt2 := &RefreshToken{
+		IDHash:    tok2Hash,
+		UserID:    u1.ID,
+		FamilyID:  "fam-123",
+		CreatedAt: now,
+		ExpiresAt: now + 3600,
+	}
+	_ = s.CreateRefreshToken(ctx, rt2)
+
+	if err := s.DeleteRefreshTokensByFamily(ctx, "fam-123"); err != nil {
+		t.Fatalf("DeleteRefreshTokensByFamily failed: %v", err)
+	}
+	if _, err := s.GetRefreshTokenByHash(ctx, tok1Hash); err != ErrNotFound {
+		t.Fatalf("expected ErrNotFound for rt1 after family delete, got %v", err)
+	}
+	if _, err := s.GetRefreshTokenByHash(ctx, tok2Hash); err != ErrNotFound {
+		t.Fatalf("expected ErrNotFound for rt2 after family delete, got %v", err)
+	}
+
+	// 8. Cascade on user delete
+	var tok3Hash [32]byte
+	copy(tok3Hash[:], "hash3___________________________")
+	rt3 := &RefreshToken{
+		IDHash:    tok3Hash,
+		UserID:    uPending.ID,
+		FamilyID:  "fam-pending",
+		CreatedAt: now,
+		ExpiresAt: now + 3600,
+	}
+	_ = s.CreateRefreshToken(ctx, rt3)
+	_ = s.DeleteUser(ctx, uPending.ID)
+	if _, err := s.GetRefreshTokenByHash(ctx, tok3Hash); err != ErrNotFound {
+		t.Fatalf("expected ErrNotFound after cascade user delete, got %v", err)
+	}
+
+	// 9. ON DELETE SET NULL on device delete
+	devID2 := "dev-rt-cascade"
+	var devTok2 [32]byte
+	copy(devTok2[:], "devtok2_________________________")
+	if err := s.UpsertDevice(ctx, &Device{ID: devID2, OwnerID: u1.ID, Name: "D2", Kind: "android", TokenHash: devTok2}); err != nil {
+		t.Fatalf("UpsertDevice 2 failed: %v", err)
+	}
+	var tok4Hash [32]byte
+	copy(tok4Hash[:], "hash4___________________________")
+	dev2Ptr := devID2
+	rt4 := &RefreshToken{
+		IDHash:    tok4Hash,
+		UserID:    u1.ID,
+		DeviceID:  &dev2Ptr,
+		FamilyID:  "fam-dev",
+		CreatedAt: now,
+		ExpiresAt: now + 3600,
+	}
+	_ = s.CreateRefreshToken(ctx, rt4)
+	if err := s.DeleteDevice(ctx, devID2); err != nil {
+		t.Fatalf("DeleteDevice failed: %v", err)
+	}
+	gotRT4, err := s.GetRefreshTokenByHash(ctx, tok4Hash)
+	if err != nil {
+		t.Fatalf("GetRefreshTokenByHash failed after device delete: %v", err)
+	}
+	if gotRT4.DeviceID != nil {
+		t.Fatalf("expected DeviceID to be set to NULL after device delete, got %v", *gotRT4.DeviceID)
+	}
+}

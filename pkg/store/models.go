@@ -12,7 +12,8 @@ type User struct {
 	ID          int64  `json:"id"`
 	Username    string `json:"username"`
 	DisplayName string `json:"display_name"`
-	Role        string `json:"role"` // "admin" or "member"
+	Role        string `json:"role"`   // "admin" or "member"
+	Status      string `json:"status"` // "pending", "active", "disabled"
 	PassHash    string `json:"-"`
 	MustChange  bool   `json:"must_change"`
 	CreatedAt   int64  `json:"created_at"`
@@ -57,4 +58,17 @@ type PushToken struct {
 	UpdatedAt int64  `json:"updated_at"`
 	LastOKAt  int64  `json:"last_ok_at,omitempty"`
 	FailCount int    `json:"fail_count"`
+}
+
+// RefreshToken represents an active or used rotating refresh token record.
+type RefreshToken struct {
+	IDHash    [32]byte `json:"-"`
+	UserID    int64    `json:"user_id"`
+	DeviceID  *string  `json:"device_id,omitempty"`
+	FamilyID  string   `json:"family_id"`
+	CreatedAt int64    `json:"created_at"`
+	ExpiresAt int64    `json:"expires_at"`
+	UsedAt    *int64   `json:"used_at,omitempty"`
+	UserAgent string   `json:"user_agent,omitempty"`
+	IP        string   `json:"ip,omitempty"`
 }
