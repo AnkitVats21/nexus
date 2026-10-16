@@ -245,6 +245,60 @@ from the phone works the same way.
 Each milestone: plan reviewed first, hub tests, the board unchanged in
 standalone mode.
 
+## 12a. Hub App Auth (Android Companion App Authentication) - As Built
+
+Implemented in `task-037` to support native Android app companion authentication, pairing, and token management:
+
+### 1. Ed25519 JWT Access Tokens
+- **Key Management**: Ed25519 private key stored in PEM format (`--jwt-key`, default `~/.config/nexus/jwt_ed25519.pem`, permissions `0600`). Hub auto-generates key if missing.
+- **Key ID (`kid`)**: First 8 bytes of `SHA256(pubkey)` encoded as a 16-character hex string.
+- **Token Format**: Standard RFC 7519 JWT signed with `EdDSA`.
+- **Claims**:
+  - `iss`: `"nexus-hub"`
+  - `aud`: `"nexus"`
+  - `sub`: user ID formatted as string
+  - `preferred_username`: user's username
+  - `role`: user role (`admin` or `member`)
+  - `exp`: 15 minutes from issue time (with 30-second leeway on validation)
+  - `iat`: issued-at timestamp
+  - `jti`: CSPRNG UUID
+- **JWKS Endpoint**: `GET /hub/api/auth/jwks` exposes RFC 7517 / RFC 8037 JWKS containing `kty: "OKP"`, `crv: "Ed25519"`, `kid`, `x` (base64url-encoded public key).
+
+### 2. Rotating Refresh Tokens & Reuse Detection
+- **Token Format**: 32-byte CSPRNG base64url string (30 days validity).
+- **Storage**: SQLite `refresh_tokens` table with SHA-256 hash (raw tokens are never stored or logged), `family_id` UUID, `user_id`, `device_id` (optional FK with SET NULL), `expires_at`, `used_at`.
+- **Rotation**: Calling `POST /hub/api/auth/refresh` with an active token issues a new access token and rotating refresh token in the same family, marking the old refresh token as `used_at`.
+- **Replay / Reuse Detection**: Presenting an already-used refresh token triggers automatic compromise detection: deletes the entire family (`DeleteRefreshTokensByFamily`) and returns `401 Unauthorized`.
+- **Revocation**: `POST /hub/api/auth/logout` deletes the entire family. Disabling a user or resetting their password purges all refresh tokens for that user.
+
+### 3. Self Sign-Up & Admin Approval Lifecycle
+- **Sign-Up**: `POST /hub/api/register` creates user with `status="pending"`. Gated by `--allow-signup` flag (default `true`; `403 Forbidden` if disabled) and setup status (`409 Conflict` before initial setup).
+- **Rate Limiting**: Sliding 1-hour window per client IP, max 5 registrations / hour (`429 Too Many Requests`).
+- **Gating**:
+  - Pending user login -> `403 Forbidden` with `{"error":{"code":"pending_approval"},"code":"pending_approval"}`.
+  - Disabled user login -> `403 Forbidden` with `{"error":{"code":"disabled"},"code":"disabled"}`.
+  - Returned ONLY after password verification to avoid credential / status probing (invalid passwords always return `401 Unauthorized`).
+- **Admin Management**:
+  - `POST /hub/api/users/{id}/approve`: pending -> active.
+  - `POST /hub/api/users/{id}/reject`: pending only -> deletes user record (`400 Bad Request` if user is active).
+  - `POST /hub/api/users/{id}/disable`: marks status as `disabled`, terminates active web sessions, deletes all refresh tokens, terminates live edge connections immediately. Edge reconnect hello rejected with `{"type": "rejected", "reason": "disabled"}` (device token preserved). Last active admin cannot be disabled (`400 Bad Request`).
+  - `POST /hub/api/users/{id}/enable`: disabled -> active.
+- **Admin Protection**: `CountActiveAdmins` ensures at least one active admin exists before delete or disable operations.
+
+### 4. App Device Registration
+- `POST /hub/api/devices/register` with Bearer auth:
+  - Enforces `kind="android"` (rejects other kinds with `400 Bad Request`).
+  - Accepts alphanumeric + hyphen IDs (max 64 chars) or auto-generates `nexus-app-<12 hex digits>`.
+  - Rotates device token if device is already owned by the requesting user.
+  - Returns `409 Conflict` if device ID is registered to another user.
+  - Binds refresh family to device ID if `refresh_family` is supplied in the request body.
+  - Returns 32-byte CSPRNG `device_token` (hash stored in DB).
+
+### 5. Bearer Auth & CSRF Rules
+- Bearer JWT accepted across all `/hub/api/*` endpoints.
+- Store user status checked dynamically on every request: disabled user access token returns `401 Unauthorized` even if JWT has not expired.
+- **CSRF Rule**: If request carries a Bearer JWT and no session cookie, CSRF check is exempt. If a session cookie is attached, CSRF check is strictly enforced regardless of Bearer header.
+
 ## 13. Open questions
 
 - The home proxy for resolving on a server hub (arranged separately).
