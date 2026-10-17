@@ -31,7 +31,11 @@ export function Login({ onNavigate }) {
         setCurrentPass(password); // Pre-fill current temporary password
       }
     } catch (err) {
-      setError(err.message || 'Invalid username or password');
+      const messages = {
+        pending_approval: 'This account is waiting for an admin to approve it.',
+        disabled: 'This account is disabled.',
+      };
+      setError(messages[err.message] || err.message || 'Invalid username or password');
     } finally {
       setBusy(false);
     }

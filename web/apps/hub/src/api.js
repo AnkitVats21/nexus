@@ -29,9 +29,14 @@ export async function request(path, options = {}) {
     }
   }
 
+  // Older endpoints answer {"error":"message"}, newer ones {"error":{"code","message"}}.
+  const errText = typeof data?.error === 'object' && data.error !== null
+    ? (data.error.message || data.error.code)
+    : data?.error;
+
   if (res.status === 401) {
     window.dispatchEvent(new CustomEvent('hub:unauthorized'));
-    const err = new Error(data?.error || 'unauthorized');
+    const err = new Error(errText || 'unauthorized');
     err.status = 401;
     throw err;
   }
@@ -45,7 +50,7 @@ export async function request(path, options = {}) {
   }
 
   if (!res.ok) {
-    const err = new Error(data?.error || `HTTP ${res.status}`);
+    const err = new Error(errText || `HTTP ${res.status}`);
     err.status = res.status;
     err.data = data;
     throw err;
@@ -75,3 +80,8 @@ export const getUsers = () => request('/hub/api/users');
 export const createUser = (user) => request('/hub/api/users', { method: 'POST', json: user });
 export const resetUserPassword = (id) => request(`/hub/api/users/${encodeURIComponent(id)}/reset`, { method: 'POST', json: {} });
 export const deleteUser = (id) => request(`/hub/api/users/${encodeURIComponent(id)}`, { method: 'DELETE', json: {} });
+const userAction = (id, action) => request(`/hub/api/users/${encodeURIComponent(id)}/${action}`, { method: 'POST', json: {} });
+export const approveUser = (id) => userAction(id, 'approve');
+export const rejectUser = (id) => userAction(id, 'reject');
+export const disableUser = (id) => userAction(id, 'disable');
+export const enableUser = (id) => userAction(id, 'enable');

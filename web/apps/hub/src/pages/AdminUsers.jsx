@@ -2,8 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { useAuth } from '../AuthContext';
 import { Card, PageHeader, Pill, Button, IconButton, Banner, Field } from '@nexus/ui';
 import { Modal } from '../components/Modal';
-import { getUsers, createUser, resetUserPassword, deleteUser } from '../api';
-import { UserPlus, RefreshCw, KeyRound, Trash2, Copy, Check, ShieldAlert, Key } from 'lucide-react';
+import { getUsers, createUser, resetUserPassword, deleteUser, approveUser, rejectUser, disableUser, enableUser } from '../api';
+import { UserPlus, RefreshCw, KeyRound, Trash2, Copy, Check, ShieldAlert, Key, UserCheck, UserX, Ban, RotateCcw } from 'lucide-react';
 
 export function AdminUsers({ onNavigate }) {
   const { user: currentUser } = useAuth();
@@ -133,6 +133,21 @@ export function AdminUsers({ onNavigate }) {
     }
   };
 
+  // Approve, reject, disable, enable: one request each, then reload the list.
+  const [actionBusy, setActionBusy] = useState(null); // `${id}:${action}`
+  const runAction = async (u, action, fn) => {
+    setActionBusy(`${u.id}:${action}`);
+    try {
+      await fn(u.id);
+      setError(null);
+      await fetchUsers();
+    } catch (err) {
+      setError(err.message || `Failed to ${action} ${u.username}`);
+    } finally {
+      setActionBusy(null);
+    }
+  };
+
   const handleCopyPassword = () => {
     if (tempPasswordModal?.tempPassword) {
       navigator.clipboard.writeText(tempPasswordModal.tempPassword);
@@ -142,6 +157,10 @@ export function AdminUsers({ onNavigate }) {
   };
 
   const adminCount = users.filter((u) => u.role === 'admin').length;
+  const activeAdminCount = users.filter((u) => u.role === 'admin' && (u.status || 'active') === 'active').length;
+  const pendingCount = users.filter((u) => u.status === 'pending').length;
+  // Pending sign-ups first, then everyone else in the hub's order.
+  const sortedUsers = [...users].sort((a, b) => (a.status === 'pending' ? 0 : 1) - (b.status === 'pending' ? 0 : 1));
 
   return (
     <div className="layout" style={{ maxWidth: 960, margin: '0 auto', padding: '0 16px 40px' }}>
@@ -169,6 +188,12 @@ export function AdminUsers({ onNavigate }) {
       </PageHeader>
 
       {error && <Banner tone="danger" style={{ marginBottom: 20 }}>{error}</Banner>}
+      {pendingCount > 0 && (
+        <Banner tone="warn" style={{ marginBottom: 20 }}>
+          {pendingCount === 1 ? '1 account is' : `${pendingCount} accounts are`} waiting for approval.
+          They can't sign in until you approve them.
+        </Banner>
+      )}
 
       <Card padded>
         <div style={{ overflowX: 'auto' }}>
@@ -183,9 +208,12 @@ export function AdminUsers({ onNavigate }) {
               </tr>
             </thead>
             <tbody>
-              {users.map((u) => {
+              {sortedUsers.map((u) => {
                 const isSelf = u.id === currentUser?.id;
                 const isLastAdmin = u.role === 'admin' && adminCount <= 1;
+                const status = u.status || 'active';
+                const isLastActiveAdmin = u.role === 'admin' && status === 'active' && activeAdminCount <= 1;
+                const busy = (action) => actionBusy === `${u.id}:${action}`;
                 return (
                   <tr key={u.id} style={{ borderBottom: '1px solid var(--border)' }}>
                     <td style={{ padding: '12px 14px', fontWeight: 600, fontFamily: 'var(--mono)' }}>
@@ -199,14 +227,66 @@ export function AdminUsers({ onNavigate }) {
                       </Pill>
                     </td>
                     <td style={{ padding: '12px 14px' }}>
-                      {u.must_change ? (
+                      {status === 'pending' ? (
+                        <Pill tone="warn">pending approval</Pill>
+                      ) : status === 'disabled' ? (
+                        <Pill tone="danger">disabled</Pill>
+                      ) : u.must_change ? (
                         <Pill tone="warn">must change password</Pill>
                       ) : (
                         <span style={{ color: 'var(--text-3)' }}>active</span>
                       )}
                     </td>
                     <td style={{ padding: '12px 14px', textAlign: 'right' }}>
-                      <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 6 }}>
+                      <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 6, flexWrap: 'wrap' }}>
+                        {status === 'pending' && (
+                          <>
+                            <Button
+                              variant="primary"
+                              size="sm"
+                              icon={UserCheck}
+                              busy={busy('approve')}
+                              onClick={() => runAction(u, 'approve', approveUser)}
+                            >
+                              Approve
+                            </Button>
+                            <Button
+                              variant="danger"
+                              size="sm"
+                              icon={UserX}
+                              busy={busy('reject')}
+                              onClick={() => runAction(u, 'reject', rejectUser)}
+                              title="Delete this pending sign-up"
+                            >
+                              Reject
+                            </Button>
+                          </>
+                        )}
+                        {status === 'active' && (
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            icon={Ban}
+                            busy={busy('disable')}
+                            onClick={() => runAction(u, 'disable', disableUser)}
+                            disabled={isSelf || isLastActiveAdmin}
+                            title={isSelf ? 'Cannot disable yourself' : isLastActiveAdmin ? 'Cannot disable the last admin' : 'Sign out everywhere and block sign-in'}
+                          >
+                            Disable
+                          </Button>
+                        )}
+                        {status === 'disabled' && (
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            icon={RotateCcw}
+                            busy={busy('enable')}
+                            onClick={() => runAction(u, 'enable', enableUser)}
+                          >
+                            Enable
+                          </Button>
+                        )}
+                        {status !== 'pending' && (
                         <Button
                           variant="secondary"
                           size="sm"
@@ -216,6 +296,8 @@ export function AdminUsers({ onNavigate }) {
                         >
                           Reset
                         </Button>
+                        )}
+                        {status !== 'pending' && (
                         <Button
                           variant="danger"
                           size="sm"
@@ -226,6 +308,7 @@ export function AdminUsers({ onNavigate }) {
                         >
                           Delete
                         </Button>
+                        )}
                       </div>
                     </td>
                   </tr>
