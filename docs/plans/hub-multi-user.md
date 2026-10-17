@@ -299,6 +299,71 @@ Implemented in `task-037` to support native Android app companion authentication
 - Store user status checked dynamically on every request: disabled user access token returns `401 Unauthorized` even if JWT has not expired.
 - **CSRF Rule**: If request carries a Bearer JWT and no session cookie, CSRF check is exempt. If a session cookie is attached, CSRF check is strictly enforced regardless of Bearer header.
 
+## 12b. Hub Per-User Music Library API - As Built
+
+Implemented in `task-039` to provide per-user data persistence and synchronization for companion apps and dashboard (M4 Phase A4):
+
+### 1. Database Schema (Migration 004)
+- **`tracks`**: Shared metadata snapshot (`video_id TEXT PRIMARY KEY`, `title`, `artist`, `album`, `duration_s`, `thumb_url`, `updated_at`). Upserted on every write carrying a track (`ON CONFLICT(video_id) DO UPDATE`).
+- **`likes`**: User likes (`user_id`, `video_id`, `liked_at`, `PRIMARY KEY (user_id, video_id)`). Cascades on user deletion.
+- **`playlists`**: User playlists (`id TEXT PRIMARY KEY` (URL-safe base64), `user_id`, `name`, `created_at`, `updated_at`, `version INTEGER NOT NULL DEFAULT 1`).
+- **`playlist_items`**: Dense items (`item_id TEXT PRIMARY KEY`, `playlist_id`, `position INTEGER NOT NULL`, `video_id`, `added_at`). Maintains dense `0..n-1` ordering across insertions, moves, and deletions in atomic transactions.
+- **`history`**: Playback scrobble log (`id INTEGER PRIMARY KEY`, `user_id`, `video_id`, `played_at`, `played_ms`, `device_id REFERENCES devices(id) ON DELETE SET NULL`, `source TEXT CHECK (source IN ('app','board','dashboard'))`). `UNIQUE (user_id, video_id, played_at)` prevents duplicate uploads.
+- **`library_versions`**: Sync version counters (`user_id PRIMARY KEY`, `likes_version`, `playlists_version`, `history_version`). Bumped inside the mutation transaction.
+
+### 2. Track Object & Validation
+Shared across all requests and responses:
+- `id`: 11-character video ID matching `^[A-Za-z0-9_-]{11}$`.
+- `title`: 1 to 300 characters (trimmed).
+- `artist`: 0 to 300 characters.
+- `album`: Optional, 0 to 300 characters.
+- `duration`: Integer seconds in range `0..86400`.
+- `thumbnail`: Optional, `https://` only, max 500 characters.
+- Non-conforming objects rejected with `400 Bad Request` (`{"error":{"code":"invalid_track"},"code":"invalid_track"}`).
+
+### 3. API Endpoints (`/hub/api/me/...`)
+All endpoints authenticated via `h.authenticate()` (session cookie or Bearer JWT). Writes enforced via `validateCSRFOrBearer()`. `must_change` status blocks access with `403 Forbidden`. User isolation strictly enforced: querying or modifying another user's playlist returns `404 Not Found` (never 403).
+
+- **Likes**:
+  - `GET /hub/api/me/likes?cursor=&limit=`: Newest first, opaque base64url cursor, default limit 50, max 200. ETag set from `likes_version`.
+  - `GET /hub/api/me/likes/ids`: Compact array `{"ids": [...]}` for heart icons. ETag set from `likes_version`.
+  - `PUT /hub/api/me/likes/{video_id}`: Idempotent like. Keeps original `liked_at`, upserts track metadata, bumps `likes_version`.
+  - `DELETE /hub/api/me/likes/{video_id}`: Idempotent unlike. Bumps `likes_version`, answers `204 No Content`.
+- **Playlists**:
+  - `GET /hub/api/me/playlists`: Returns user's playlists with `id`, `name`, `count`, `version`, `updated_at`, and up to 4 item thumbnails. ETag set from `playlists_version`.
+  - `POST /hub/api/me/playlists`: `{name}` (1-100 characters trimmed). Max 500 playlists per user (exceeding answers `422 Unprocessable Entity` `{"error":{"code":"limit"}}`). Answers `201 Created`.
+  - `GET /hub/api/me/playlists/{id}?cursor=&limit=`: Returns playlist metadata and items with `item_id`, `position`, `added_at`, `track`. ETag set from playlist `version`.
+  - `PATCH /hub/api/me/playlists/{id}`: `{name, version?}`. Version mismatch answers `409 Conflict` `{"error":{"code":"version_conflict"},"current_version":v}`. Returns new version.
+  - `DELETE /hub/api/me/playlists/{id}?version=`: Deletes playlist and items, bumps `playlists_version`, answers `204 No Content`.
+  - `POST /hub/api/me/playlists/{id}/items`: `{tracks:[...], position?, version?}`. Max 5000 items per playlist (exceeding answers `422 limit`). Maintains dense `0..n-1` positions. Returns `{"version": new_version, "added": n}`.
+  - `DELETE /hub/api/me/playlists/{id}/items/{item_id}?version=`: Deletes item and re-indexes dense `0..n-1`. Returns `{"version": new_version}`.
+  - `POST /hub/api/me/playlists/{id}/move`: `{item_id, to, version?}`. Reorders item to `to` index and densely re-indexes `0..n-1`. Returns `{"version": new_version}`.
+- **History**:
+  - `POST /hub/api/me/history`: `{entries: [...]}` up to 200 per call (exceeding answers `422 limit`). Enforces time window `[-30 days, +5 min]` (out-of-window answers `400 invalid_timestamp`). Verifies device ownership against registered devices (foreign device IDs set to NULL). Duplicate `(user_id, video_id, played_at)` ignored via `INSERT OR IGNORE`. Answers `{"accepted": n}`.
+  - `GET /hub/api/me/history?cursor=&limit=`: Newest first, opaque base64url cursor paging. ETag set from `history_version`.
+  - `DELETE /hub/api/me/history`: Clears all history for user, answers `204 No Content`.
+  - `DELETE /hub/api/me/history/{id}`: Deletes single history row, answers `204 No Content`.
+- **Sync Helper**:
+  - `GET /hub/api/me/library/versions`: Answers `{"likes": n, "playlists": n, "history": n}` for instant cache validation.
+  - All list endpoints evaluate `If-None-Match` against the matching version and answer `304 Not Modified` on cache hits.
+
+### 4. Rate Limiting & Retention
+- **Write Rate Limiter**: 120 writes/min per user enforced across all state-changing `/hub/api/me/...` endpoints via `RateLimiter` (exceeding answers `429 Too Many Requests` `{"error":{"code":"rate_limited"}}`).
+- **History Retention**: Newest 10,000 history rows kept per user, pruned periodically on hub startup and via the 6-hour maintenance ticker.
+
+### 5. Hub-Played History Hook
+- When the hub's music controller plays a song on a user's board player edge (`ownerID > 0`), it monitors playback progress:
+  - If playback reaches 30 seconds (`music_report.position_ms >= 30000`), a history row with `source: 'board'` and the device ID is recorded for the owner.
+  - If a track shorter than 30s ends normally (`music_event.event == 'ended'`), it records the history row upon completion.
+  - Skips before 30s are not scrobbled. Each playback sequence is recorded at most once. Edge protocol remains untouched.
+
+### 6. Out of Scope
+The following components are deferred to subsequent tasks:
+- Per-user music controller and outputs (independent queues per user).
+- Library sharing between hub users.
+- Gemini voice session tools for library ("like this song", "play my liked songs").
+- Catalog search service and recommendations service.
+
 ## 13. Open questions
 
 - The home proxy for resolving on a server hub (arranged separately).
