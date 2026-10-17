@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -48,14 +49,15 @@ const (
 	EdgePath        = "/hub/edge"
 	BoardPath       = "/hub/board" // proto 1 boards; the same endpoint
 
-	helloTimeout    = 10 * time.Second
-	pingInterval    = 5 * time.Second
-	pingTimeout     = 10 * time.Second
-	writeTimeout    = 5 * time.Second
-	browserQueueLen = 64
-	boardQueueLen   = 64
-	maxBoardMessage = 256 << 10
-	maxBrowserFrame = 4 << 10
+	helloTimeout     = 10 * time.Second
+	pingInterval     = 5 * time.Second
+	edgePingInterval = 10 * time.Second
+	pingTimeout      = 10 * time.Second
+	writeTimeout     = 5 * time.Second
+	browserQueueLen  = 64
+	boardQueueLen    = 64
+	maxBoardMessage  = 256 << 10
+	maxBrowserFrame  = 4 << 10
 
 	// Close codes.
 	closeRejected     = websocket.StatusCode(4001)
@@ -121,6 +123,9 @@ type Config struct {
 	JWTKeyPath string
 	// Pre-configured JWT service (optional, for tests).
 	JWT *auth.JWTService
+
+	// ResolveOnly disables caching and serving song bytes, resolving stream URLs only.
+	ResolveOnly bool
 }
 
 func (c Config) legacyTokensEnabled() bool {
@@ -163,6 +168,72 @@ type Hub struct {
 	legacyLogged  map[string]bool
 
 	stopMaintenance context.CancelFunc
+
+	repliesMu sync.Mutex
+	replies   []ReplyTiming
+}
+
+type ReplyTiming struct {
+	EdgeID      string `json:"edge_id,omitempty"`
+	How         string `json:"how"`
+	AudioMs     int64  `json:"audio_ms"`
+	SpanMs      int64  `json:"span_ms"`
+	MaxGapMs    int64  `json:"max_gap_ms"`
+	HubDelayMs  int64  `json:"hub_delay_ms"`
+	EdgeDelayMs int64  `json:"edge_delay_ms"`
+}
+
+func (h *Hub) recordReply(r ReplyTiming) {
+	h.repliesMu.Lock()
+	defer h.repliesMu.Unlock()
+	h.replies = append(h.replies, r)
+	if len(h.replies) > 10 {
+		h.replies = h.replies[len(h.replies)-10:]
+	}
+}
+
+func (h *Hub) recentReplies() []ReplyTiming {
+	h.repliesMu.Lock()
+	defer h.repliesMu.Unlock()
+	if len(h.replies) == 0 {
+		return []ReplyTiming{}
+	}
+	res := make([]ReplyTiming, len(h.replies))
+	copy(res, h.replies)
+	return res
+}
+
+type pingStats struct {
+	mu    sync.Mutex
+	count int64
+	total time.Duration
+	last  time.Duration
+	min   time.Duration
+}
+
+func (s *pingStats) record(d time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.count++
+	s.total += d
+	s.last = d
+	if s.min == 0 || d < s.min {
+		s.min = d
+	}
+}
+
+func (s *pingStats) summary() map[string]any {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.count == 0 {
+		return nil
+	}
+	avg := float64(s.total.Milliseconds()) / float64(s.count)
+	return map[string]any{
+		"last": s.last.Milliseconds(),
+		"min":  s.min.Milliseconds(),
+		"avg":  math.Round(avg*10) / 10,
+	}
 }
 
 type edge struct {
@@ -185,6 +256,7 @@ type edge struct {
 	ownerID       int64
 	ownerName     string
 	isLegacyToken bool
+	ping          pingStats
 }
 
 // edgeRoles are the roles an edge takes (docs/PROTOCOL.md section 2); nil
@@ -254,6 +326,9 @@ func New(cfg Config) (*Hub, error) {
 	}
 	if cfg.VoiceLead <= 0 {
 		cfg.VoiceLead = defaultVoiceLead
+	}
+	if cfg.ResolveOnly {
+		cfg.Cache = nil
 	}
 	h := &Hub{
 		cfg:          cfg,
@@ -672,7 +747,7 @@ func (h *Hub) serveEdge(w http.ResponseWriter, r *http.Request) {
 	}
 	go h.boardWriter(ctx, b)
 	go b.voiceQ.run(ctx, func(err error) { h.dropBoard(b, err) })
-	go h.pinger(ctx, conn, func(err error) { h.dropBoard(b, err) })
+	go h.pinger(ctx, conn, edgePingInterval, b.ping.record, func(err error) { h.dropBoard(b, err) })
 	for {
 		typ, data, err := conn.Read(ctx)
 		if err != nil {
@@ -826,7 +901,7 @@ func (h *Hub) closeEdgesForUser(userID int64) {
 			e.cancel()
 		}
 		if e.conn != nil {
-			_ = e.conn.Close(closeRejected, "user disabled")
+			go e.conn.Close(closeRejected, "user disabled") // don't hold the request for the handshake
 		}
 	}
 }
@@ -908,7 +983,7 @@ func (h *Hub) serveBrowser(w http.ResponseWriter, r *http.Request) {
 
 	defer h.dropBrowser(br)
 	go h.browserWriter(ctx, br)
-	go h.pinger(ctx, conn, func(error) { h.dropBrowser(br) })
+	go h.pinger(ctx, conn, pingInterval, nil, func(error) { h.dropBrowser(br) })
 	for {
 		typ, data, err := conn.Read(ctx)
 		if err != nil {
@@ -1009,15 +1084,24 @@ func (h *Hub) dropBrowser(br *browser) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func newProxy(target *url.URL) *httputil.ReverseProxy {
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.DialContext = (&net.Dialer{
+		Timeout:   2 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}).DialContext
+
 	return &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.SetURL(target)
 			pr.Out.Host = target.Host
 		},
+		Transport: tr,
 		// Stream large transfers (OTA, files, recordings) as they come.
 		FlushInterval: -1,
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
-			http.Error(w, `{"status":"error","message":"board unreachable"}`, http.StatusBadGateway)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadGateway)
+			w.Write([]byte(`{"status":"error","message":"board not reachable from the hub"}`))
 		},
 	}
 }
@@ -1240,18 +1324,27 @@ func (h *Hub) serveStatus(w http.ResponseWriter, r *http.Request) {
 	status := map[string]any{"version": h.cfg.Version, "browsers": len(h.browsers), "voice": h.voiceEnabled(),
 		"music": h.music != nil}
 	if b := h.board; b != nil {
-		status["board"] = map[string]any{
+		bm := map[string]any{
 			"id": b.id, "name": b.name, "fw": b.fw, "api": b.apiBase.String(),
 			"connected_s": int(time.Since(b.since).Seconds()),
 		}
+		if rtt := b.ping.summary(); rtt != nil {
+			bm["rtt_ms"] = rtt
+		}
+		status["board"] = bm
 	}
 	var edges []map[string]any
 	for _, e := range h.edges {
-		edges = append(edges, map[string]any{"id": e.id, "name": e.name, "kind": e.kind, "fw": e.fw,
-			"roles": e.roles.String(), "connected_s": int(time.Since(e.since).Seconds())})
+		em := map[string]any{"id": e.id, "name": e.name, "kind": e.kind, "fw": e.fw,
+			"roles": e.roles.String(), "connected_s": int(time.Since(e.since).Seconds())}
+		if rtt := e.ping.summary(); rtt != nil {
+			em["rtt_ms"] = rtt
+		}
+		edges = append(edges, em)
 	}
 	status["edges"] = edges
 	h.mu.Unlock()
+	status["replies"] = h.recentReplies()
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(status)
 }
@@ -1259,22 +1352,27 @@ func (h *Hub) serveStatus(w http.ResponseWriter, r *http.Request) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 // pinger drops a connection that stops answering pings.
-func (h *Hub) pinger(ctx context.Context, conn *websocket.Conn, drop func(error)) {
-	t := time.NewTicker(pingInterval)
+func (h *Hub) pinger(ctx context.Context, conn *websocket.Conn, interval time.Duration, onPong func(time.Duration), drop func(error)) {
+	t := time.NewTicker(interval)
 	defer t.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
+			t0 := time.Now()
 			pctx, cancel := context.WithTimeout(ctx, pingTimeout)
 			err := conn.Ping(pctx)
+			rtt := time.Since(t0)
 			cancel()
 			if err != nil {
 				if ctx.Err() == nil {
 					drop(fmt.Errorf("no pong: %w", err))
 				}
 				return
+			}
+			if onPong != nil {
+				onPong(rtt)
 			}
 		}
 	}

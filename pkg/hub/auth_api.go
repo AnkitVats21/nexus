@@ -1630,8 +1630,8 @@ func (h *Hub) handleDeviceDelete(w http.ResponseWriter, r *http.Request, id stri
 				h.lastState = nil
 			}
 			h.mu.Unlock()
-			e.conn.Close(closeRejected, "bad token")
 			e.cancel()
+			go e.conn.Close(closeRejected, "bad token")
 			writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 			return
 		}
@@ -1661,9 +1661,11 @@ func (h *Hub) handleDeviceDelete(w http.ResponseWriter, r *http.Request, id stri
 	}
 	h.mu.Unlock()
 
+	// Close in the background: the close handshake can wait up to 5 s for the edge, and
+	// the request shouldn't.
 	if e != nil {
-		e.conn.Close(closeRejected, "bad token")
 		e.cancel()
+		go e.conn.Close(closeRejected, "bad token")
 	}
 
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})

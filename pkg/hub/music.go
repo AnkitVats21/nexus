@@ -227,6 +227,9 @@ func (m *Music) play(ctx context.Context, from *edge, id, query string, cached b
 	needURL := m.needsURL(out) && !(cached && out == from) && !m.h.cfg.Cache.Has(id)
 	info, err := m.src.Lookup(ctx, id, query, needURL, musicRecs)
 	if err == nil {
+		if m.h.cfg.ResolveOnly && m.h.cfg.Cache != nil {
+			panic("hub: cache must not be used in resolve-only mode")
+		}
 		m.h.cfg.Cache.Fetch(info.ID, info.URL)
 	}
 

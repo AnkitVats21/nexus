@@ -387,3 +387,73 @@ func TestMusicCache(t *testing.T) {
 		t.Error("x1 and x3 should be kept")
 	}
 }
+
+func TestResolveOnly(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	song := make([]byte, 100<<10)
+	cdn := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(song)
+	}))
+	t.Cleanup(cdn.Close)
+
+	cacheDir := t.TempDir()
+	cache, err := NewMusicCache(cacheDir, 10<<20, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	h, err := New(Config{
+		Version:     "test",
+		Tokens:      []string{testToken},
+		Tracks:      &cdnTracks{cdn: cdn.URL},
+		Cache:       cache,
+		ResolveOnly: true,
+		NoAuth:      true,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if h.cfg.Cache != nil {
+		t.Fatalf("expected h.cfg.Cache to be nil in resolve-only mode, got %v", h.cfg.Cache)
+	}
+
+	srv := httptest.NewServer(h.Handler())
+	t.Cleanup(srv.Close)
+
+	// Verify /hub/cache/ is not mounted (returns 404).
+	cacheResp, err := http.Get(srv.URL + CachePath + "a.webm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cacheResp.Body.Close()
+	if cacheResp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected /hub/cache/ to return 404 in resolve-only mode, got %d", cacheResp.StatusCode)
+	}
+
+	board := connectEdge(t, ctx, srv.URL, "board", boardRoles)
+
+	// First play: resolves directly to CDN.
+	write(t, ctx, board.conn, map[string]any{"type": "music_action", "action": "play", "query": "alpha"})
+	p := board.next(ctx, "music_play")
+	if p["url"] != cdn.URL+"/a" {
+		t.Fatalf("first play url = %v, want %v", p["url"], cdn.URL+"/a")
+	}
+
+	// Settle briefly and ensure no cache download occurs.
+	time.Sleep(50 * time.Millisecond)
+	if cache.Has("a") {
+		t.Fatal("song 'a' should not be cached in resolve-only mode")
+	}
+	entries, _ := os.ReadDir(cacheDir)
+	if len(entries) > 0 {
+		t.Fatalf("cache directory should remain empty, found %d entries", len(entries))
+	}
+
+	// Second play: plays again and still resolves directly to CDN, not from hub cache.
+	write(t, ctx, board.conn, map[string]any{"type": "music_action", "action": "play", "id": "a"})
+	p2 := board.next(ctx, "music_play")
+	if p2["url"] != cdn.URL+"/a" {
+		t.Fatalf("second play url = %v, want direct CDN %v", p2["url"], cdn.URL+"/a")
+	}
+}

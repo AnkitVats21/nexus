@@ -23,9 +23,10 @@ const (
 // control message that must not overtake the audio before it (turn_complete,
 // interrupted).
 type voiceItem struct {
-	pcm  []byte
-	text []byte
-	gen  uint64
+	pcm    []byte
+	text   []byte
+	gen    uint64
+	onSent func(time.Time)
 }
 
 // voiceQueue sends a reply to the board at a bit more than real time: at
@@ -51,15 +52,29 @@ func newVoiceQueue(conn *websocket.Conn, lead time.Duration) *voiceQueue {
 }
 
 func (q *voiceQueue) pushPCM(pcm []byte) {
+	q.pushPCMWithSent(pcm, nil)
+}
+
+func (q *voiceQueue) pushPCMFirst(pcm []byte, onSent func(time.Time)) {
+	q.pushPCMWithSent(pcm, onSent)
+}
+
+func (q *voiceQueue) pushPCMWithSent(pcm []byte, onSent func(time.Time)) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	first := true
 	for len(pcm) > 0 {
 		n := min(len(pcm), voiceChunkBytes)
 		n &^= 1
 		if n == 0 {
 			break
 		}
-		q.items = append(q.items, voiceItem{pcm: pcm[:n:n], gen: q.gen})
+		var cb func(time.Time)
+		if first {
+			cb = onSent
+			first = false
+		}
+		q.items = append(q.items, voiceItem{pcm: pcm[:n:n], gen: q.gen, onSent: cb})
 		pcm = pcm[n:]
 	}
 	q.cond.Signal()
@@ -140,6 +155,9 @@ func (q *voiceQueue) run(ctx context.Context, onErr func(error)) {
 				if err := q.write(ctx, websocket.MessageBinary, frame); err != nil {
 					onErr(err)
 					return
+				}
+				if it.onSent != nil {
+					it.onSent(time.Now())
 				}
 				break
 			}

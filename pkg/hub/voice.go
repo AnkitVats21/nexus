@@ -110,6 +110,21 @@ type voiceSession struct {
 	replyFirst, replyLast time.Time
 	replyBytes            int
 	replyMaxGap           time.Duration
+	turnMicLast           time.Time
+	replyHubDelay         time.Duration
+	replyEdgeDelay        time.Duration
+	replyEdgeFirst        time.Time
+}
+
+func (v *voiceSession) noteEdgeFirstAudio(sentAt time.Time) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.replyEdgeFirst.IsZero() {
+		v.replyEdgeFirst = sentAt
+		if !v.turnMicLast.IsZero() {
+			v.replyEdgeDelay = sentAt.Sub(v.turnMicLast)
+		}
+	}
 }
 
 func (h *Hub) voiceFor(id string) *voiceSession {
@@ -279,6 +294,7 @@ func (v *voiceSession) mic(flags byte, payload []byte) {
 }
 
 func (v *voiceSession) queueMicLocked(pcm []byte) {
+	v.turnMicLast = time.Now()
 	v.pcmBytes += len(pcm)
 	v.micBytes = v.pcmBytes
 	if v.gc == nil || !v.gc.ready {
@@ -587,11 +603,21 @@ func (v *voiceSession) onGemini(gc *geminiConn, data []byte) {
 					v.log.Warn("Bad audio in a Gemini message", "err", err)
 					continue
 				}
+				firstChunk := v.replyFirst.IsZero()
 				v.noteAudioLocked(len(pcm))
 				v.outputting = true
 				v.owed = false
+				if firstChunk && !v.turnMicLast.IsZero() {
+					v.replyHubDelay = v.replyFirst.Sub(v.turnMicLast)
+				}
 				if v.active && !v.dropReply && v.b != nil {
-					v.b.voiceQ.pushPCM(pcm)
+					if firstChunk {
+						v.b.voiceQ.pushPCMFirst(pcm, func(sentAt time.Time) {
+							v.noteEdgeFirstAudio(sentAt)
+						})
+					} else {
+						v.b.voiceQ.pushPCM(pcm)
+					}
 				}
 			}
 		}
@@ -879,9 +905,35 @@ func (v *voiceSession) logReplyLocked(how string) {
 	if span > 0 {
 		rate = float64(audio) / float64(span)
 	}
+	hubDelayMs := int64(-1)
+	if v.replyHubDelay > 0 {
+		hubDelayMs = v.replyHubDelay.Milliseconds()
+	}
+	edgeDelayMs := int64(-1)
+	if v.replyEdgeDelay > 0 {
+		edgeDelayMs = v.replyEdgeDelay.Milliseconds()
+	}
+
 	v.log.Info("Reply delivery", "how", how, "audio_ms", audio.Milliseconds(), "span_ms", span.Milliseconds(),
-		"rate", fmt.Sprintf("%.2fx", rate), "max_gap_ms", v.replyMaxGap.Milliseconds())
+		"rate", fmt.Sprintf("%.2fx", rate), "max_gap_ms", v.replyMaxGap.Milliseconds(),
+		"last_mic_to_hub_ms", hubDelayMs, "last_mic_to_edge_ms", edgeDelayMs)
+
+	if v.h != nil {
+		v.h.recordReply(ReplyTiming{
+			EdgeID:      v.id,
+			How:         how,
+			AudioMs:     audio.Milliseconds(),
+			SpanMs:      span.Milliseconds(),
+			MaxGapMs:    v.replyMaxGap.Milliseconds(),
+			HubDelayMs:  hubDelayMs,
+			EdgeDelayMs: edgeDelayMs,
+		})
+	}
+
 	v.replyFirst, v.replyLast, v.replyBytes, v.replyMaxGap = time.Time{}, time.Time{}, 0, 0
+	v.replyHubDelay, v.replyEdgeDelay = 0, 0
+	v.replyEdgeFirst = time.Time{}
+	v.turnMicLast = time.Time{}
 }
 
 func modelName(setup map[string]any) string {

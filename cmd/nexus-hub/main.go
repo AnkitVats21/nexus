@@ -70,6 +70,7 @@ func main() {
 	jwtKeyFile := flag.String("jwt-key", filepath.Join(home, ".config", "nexus", "jwt_ed25519.pem"), "Ed25519 private key PEM file for JWT signing")
 	var allowOrigins stringSlice
 	flag.Var(&allowOrigins, "allow-origin", "repeatable allowed Origin for browser WebSocket connections (e.g. http://localhost:5173)")
+	resolveOnly := flag.Bool("resolve-only", false, "resolve songs only; never download or serve music bytes (forces cache off; requires a resolver)")
 	debug := flag.Bool("debug", false, "debug logging")
 	flag.Parse()
 
@@ -164,8 +165,16 @@ func main() {
 			}
 		}
 	}
+	if *resolveOnly {
+		if tracks == nil {
+			log.Error("--resolve-only requires a music resolver (--music-api, --invidious-url, or --mcp-url)")
+			fmt.Fprintf(os.Stderr, "--resolve-only requires a music resolver (--music-api, --invidious-url, or --mcp-url)\n")
+			os.Exit(1)
+		}
+		log.Info("resolve-only mode: music cache disabled, streaming direct to players")
+	}
 	var cache *hub.MusicCache
-	if tracks != nil && *cacheMB > 0 {
+	if tracks != nil && *cacheMB > 0 && !*resolveOnly {
 		if cache, err = hub.NewMusicCache(*cacheDir, int64(*cacheMB)<<20, log); err != nil {
 			log.Warn("No music cache", "dir", *cacheDir, "err", err)
 			cache = nil
@@ -176,7 +185,7 @@ func main() {
 		DBPath: *dbPath, TrustedProxy: *trustedProxy, PublicURL: *publicURL, AllowedOrigins: allowOrigins,
 		LegacyTokens: legacyTokens, PairingPepperPath: *pairingPepperFile,
 		FCMCredentials: *fcmCredentials, FCMProject: *fcmProject,
-		AllowSignup: allowSignup, JWTKeyPath: *jwtKeyFile})
+		AllowSignup: allowSignup, JWTKeyPath: *jwtKeyFile, ResolveOnly: *resolveOnly})
 	if err != nil {
 		log.Error("Failed to initialize hub", "err", err)
 		os.Exit(1)
