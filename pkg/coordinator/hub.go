@@ -76,8 +76,10 @@ func (c *Coordinator) handleHubMessage(data []byte) {
 			if err := config.SaveOrbitToken(tokPath, m.Token); err != nil {
 				c.log.Error("Failed to save orbit token", "err", err)
 			} else {
+				c.stateMu.Lock()
 				c.cfg.OrbitToken = m.Token
 				c.cfg.PairCode = ""
+				c.stateMu.Unlock()
 				c.log.Info("Paired with hub", "owner", m.Owner)
 			}
 		}
@@ -88,9 +90,14 @@ func (c *Coordinator) handleHubMessage(data []byte) {
 			Reason string `json:"reason"`
 		}
 		_ = json.Unmarshal(data, &m)
-		if m.Reason == "bad token" && c.cfg.OrbitToken != "" {
-			_ = config.DeleteOrbitToken(c.orbitTokenPath())
+		c.stateMu.Lock()
+		isBadToken := m.Reason == "bad token" && c.cfg.OrbitToken != ""
+		if isBadToken {
 			c.cfg.OrbitToken = ""
+		}
+		c.stateMu.Unlock()
+		if isBadToken {
+			_ = config.DeleteOrbitToken(c.orbitTokenPath())
 			c.log.Warn("Hub rejected device token; device must be paired again")
 		} else {
 			c.log.Error("The hub refused this satellite", "reason", m.Reason)

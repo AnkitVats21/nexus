@@ -76,6 +76,13 @@ func (c *Coordinator) Start() error {
 	return nil
 }
 
+// OrbitToken returns the current orbit token thread-safely.
+func (c *Coordinator) OrbitToken() string {
+	c.stateMu.RLock()
+	defer c.stateMu.RUnlock()
+	return c.cfg.OrbitToken
+}
+
 // Stop shuts down the coordinator and releases resources.
 func (c *Coordinator) Stop() {
 	c.cancel()

@@ -363,17 +363,23 @@ func TestOrbitBadTokenFlow(t *testing.T) {
 
 	// Verify file is deleted and in-memory token is cleared
 	var fileDeleted bool
+	var tokenCleared bool
 	for start := time.Now(); time.Since(start) < 2*time.Second; time.Sleep(20 * time.Millisecond) {
 		if _, err := os.Stat(tokFile); os.IsNotExist(err) {
 			fileDeleted = true
+		}
+		if coord.OrbitToken() == "" {
+			tokenCleared = true
+		}
+		if fileDeleted && tokenCleared {
 			break
 		}
 	}
 	if !fileDeleted {
 		t.Fatal("expected orbit token file to be deleted on bad token")
 	}
-	if cfg.OrbitToken != "" {
-		t.Fatalf("expected OrbitToken to be cleared, got %q", cfg.OrbitToken)
+	if !tokenCleared {
+		t.Fatalf("expected OrbitToken to be cleared, got %q", coord.OrbitToken())
 	}
 }
 
