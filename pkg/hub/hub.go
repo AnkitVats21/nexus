@@ -354,6 +354,11 @@ func New(cfg Config) (*Hub, error) {
 		} else if n > 0 {
 			h.log.Info("pruned expired refresh tokens on startup", "count", n)
 		}
+		if n, err := h.store.PruneHistory(context.Background(), 10000); err != nil {
+			h.log.Warn("failed to prune history on startup", "err", err)
+		} else if n > 0 {
+			h.log.Info("pruned history on startup", "count", n)
+		}
 
 		maintCtx, maintCancel := context.WithCancel(context.Background())
 		h.stopMaintenance = maintCancel
@@ -369,6 +374,11 @@ func New(cfg Config) (*Hub, error) {
 						h.log.Warn("periodic prune refresh tokens failed", "err", err)
 					} else if n > 0 {
 						h.log.Info("pruned expired refresh tokens", "count", n)
+					}
+					if n, err := h.store.PruneHistory(maintCtx, 10000); err != nil {
+						h.log.Warn("periodic prune history failed", "err", err)
+					} else if n > 0 {
+						h.log.Info("pruned history", "count", n)
 					}
 				}
 			}

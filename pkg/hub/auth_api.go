@@ -103,13 +103,17 @@ func (h *Hub) registerAuthRoutes(mux *http.ServeMux) {
 }
 
 func (h *Hub) serveHubAPI(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
-
 	path := strings.TrimPrefix(r.URL.Path, "/hub/api")
 	if path == "" || path == "/" {
 		http.NotFound(w, r)
 		return
 	}
+
+	maxBody := int64(16 << 10)
+	if strings.HasPrefix(path, "/me/") {
+		maxBody = 512 << 10
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxBody)
 
 	switch {
 	case path == "/setup":
@@ -164,6 +168,62 @@ func (h *Hub) serveHubAPI(w http.ResponseWriter, r *http.Request) {
 	case path == "/me/password":
 		if r.Method == http.MethodPost {
 			h.handleMePasswordPost(w, r)
+			return
+		}
+	case path == "/me/library/versions":
+		if r.Method == http.MethodGet {
+			h.handleLibraryVersionsGet(w, r)
+			return
+		}
+	case path == "/me/likes":
+		if r.Method == http.MethodGet {
+			h.handleLikesGet(w, r)
+			return
+		}
+	case path == "/me/likes/ids":
+		if r.Method == http.MethodGet {
+			h.handleLikesIDsGet(w, r)
+			return
+		}
+	case strings.HasPrefix(path, "/me/likes/"):
+		videoID := strings.TrimPrefix(path, "/me/likes/")
+		if r.Method == http.MethodPut {
+			h.handleLikePut(w, r, videoID)
+			return
+		}
+		if r.Method == http.MethodDelete {
+			h.handleLikeDelete(w, r, videoID)
+			return
+		}
+	case path == "/me/playlists":
+		if r.Method == http.MethodGet {
+			h.handlePlaylistsGet(w, r)
+			return
+		}
+		if r.Method == http.MethodPost {
+			h.handlePlaylistCreate(w, r)
+			return
+		}
+	case strings.HasPrefix(path, "/me/playlists/"):
+		h.routePlaylistEndpoints(w, r, strings.TrimPrefix(path, "/me/playlists/"))
+		return
+	case path == "/me/history":
+		if r.Method == http.MethodGet {
+			h.handleHistoryGet(w, r)
+			return
+		}
+		if r.Method == http.MethodPost {
+			h.handleHistoryPost(w, r)
+			return
+		}
+		if r.Method == http.MethodDelete {
+			h.handleHistoryClear(w, r)
+			return
+		}
+	case strings.HasPrefix(path, "/me/history/"):
+		idStr := strings.TrimPrefix(path, "/me/history/")
+		if r.Method == http.MethodDelete {
+			h.handleHistoryItemDelete(w, r, idStr)
 			return
 		}
 	case path == "/users":

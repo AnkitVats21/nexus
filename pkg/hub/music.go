@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"nexus/pkg/store"
 )
 
 // Music is the hub's music controller (docs/PROTOCOL.md section 5): the
@@ -68,6 +70,16 @@ type Music struct {
 	// since): it plays again when they are over, wherever it is by then. A
 	// player that has the session pauses and resumes its own music.
 	sessionPaused bool
+	boardHist     *boardPlaybackHistory
+}
+
+type boardPlaybackHistory struct {
+	seq       uint64
+	track     Track
+	playerID  string
+	ownerID   int64
+	startedAt time.Time
+	recorded  bool
 }
 
 func newMusic(h *Hub, src TrackSource) *Music {
@@ -503,6 +515,13 @@ func (m *Music) report(e *edge, r musicReport) {
 	if r.State == "playing" {
 		m.skips = 0
 	}
+	if m.boardHist != nil && !m.boardHist.recorded && m.boardHist.seq == r.Seq && m.boardHist.playerID == e.id {
+		if r.PositionMs >= 30000 || time.Since(m.boardHist.startedAt) >= 30*time.Second {
+			m.boardHist.recorded = true
+			bh := *m.boardHist
+			go m.recordBoardHistory(bh, r.PositionMs)
+		}
+	}
 	m.broadcastLocked()
 }
 
@@ -514,6 +533,15 @@ func (m *Music) event(e *edge, seq uint64, id, ev, reason string) {
 	}
 	switch ev {
 	case "ended":
+		if m.boardHist != nil && !m.boardHist.recorded && m.boardHist.seq == seq && m.boardHist.playerID == e.id {
+			m.boardHist.recorded = true
+			bh := *m.boardHist
+			playedMs := m.durMs
+			if m.posMs > 0 && (playedMs <= 0 || m.posMs > playedMs) {
+				playedMs = m.posMs
+			}
+			go m.recordBoardHistory(bh, playedMs)
+		}
 		m.nextLocked(false)
 	case "error":
 		m.skips++
@@ -803,6 +831,18 @@ func (m *Music) startLocked(t Track, url string, posMs int64, paused bool) {
 	if url != "" {
 		msg["url"] = url
 	}
+	if out.ownerID > 0 {
+		m.boardHist = &boardPlaybackHistory{
+			seq:       m.seq,
+			track:     t,
+			playerID:  out.id,
+			ownerID:   out.ownerID,
+			startedAt: time.Now(),
+			recorded:  false,
+		}
+	} else {
+		m.boardHist = nil
+	}
 	m.log.Info("Playing", "id", t.ID, "title", t.Title, "player", out.id, "seq", m.seq)
 	m.sendLocked(out, msg)
 }
@@ -1082,4 +1122,31 @@ func errReason(err error) string {
 		return "not_found"
 	}
 	return "lookup_failed"
+}
+
+func (m *Music) recordBoardHistory(bh boardPlaybackHistory, playedMs int64) {
+	if m.h == nil || m.h.store == nil || bh.ownerID <= 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var devID *string
+	if bh.playerID != "" {
+		if d, err := m.h.store.GetDeviceByID(ctx, bh.playerID); err == nil && d != nil {
+			devID = &bh.playerID
+		}
+	}
+	entry := store.HistoryEntry{
+		Track:    bh.track.toStore(),
+		PlayedAt: bh.startedAt.UnixMilli(),
+		PlayedMs: playedMs,
+		DeviceID: devID,
+		Source:   "board",
+	}
+	if _, err := m.h.store.AddHistory(ctx, bh.ownerID, []store.HistoryEntry{entry}); err != nil {
+		m.log.Warn("Failed to record board history", "err", err, "track", bh.track.ID, "user", bh.ownerID)
+	} else {
+		m.log.Info("Recorded board history", "track", bh.track.ID, "user", bh.ownerID, "played_ms", playedMs)
+	}
 }
