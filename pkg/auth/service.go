@@ -29,7 +29,7 @@ var (
 
 // dummyPasswordHash is a pre-computed valid Argon2id hash used to prevent timing
 // side-channels when authenticating non-existent usernames.
-const dummyPasswordHash = "$argon2id$v=19$m=65536,t=3,p=2$OcmZvIua+ASMMohB+hBYvw$XWtmVOa87Y7yBi7/JOhrLJM+fDFSufieY7suNIUljKY"
+const dummyPasswordHash = "$argon2id$v=19$m=8192,t=1,p=1$PjZiNtYBomrGk8ZYYe4Jvg$Tzq79mUWFuFzMhRykuslbGjEpsxZVL7yTNvlELD2iR4"
 
 // Service coordinates authentication, session management, password hashing, and rate limiting.
 type Service struct {
@@ -258,6 +258,16 @@ func (s *Service) VerifyUserCredentials(ctx context.Context, username, password,
 	}
 
 	s.rateLimiter.ResetLoginFailures(username, ip)
+
+	// Re-save hashes made with older (heavier) settings; a failure here only
+	// means the next login rehashes again.
+	if NeedsRehash(u.PassHash) {
+		if h, err := HashPassword(password); err == nil {
+			if s.store.UpdateUserPassword(ctx, u.ID, h, u.MustChange) == nil {
+				u.PassHash = h
+			}
+		}
+	}
 
 	// Login gating: pending or disabled return specific errors only after password is confirmed correct
 	if u.Status == "pending" {

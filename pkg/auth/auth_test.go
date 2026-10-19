@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net/http"
@@ -12,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/crypto/argon2"
 )
 
 func newTestStoreAndAuth(t *testing.T) (*store.Store, *Service, func()) {
@@ -51,7 +54,7 @@ func TestPasswordHashingAndVerification(t *testing.T) {
 		t.Fatalf("HashPassword: %v", err)
 	}
 
-	if !strings.HasPrefix(encoded, "$argon2id$v=19$m=65536,t=3,p=2$") {
+	if !strings.HasPrefix(encoded, "$argon2id$v=19$m=8192,t=1,p=1$") {
 		t.Fatalf("unexpected hash header: %s", encoded)
 	}
 
@@ -584,5 +587,39 @@ func TestPairingHelpersAndPepper(t *testing.T) {
 	tokHash := HashDeviceToken(tok)
 	if tokHash == [32]byte{} {
 		t.Fatal("zero token hash")
+	}
+}
+
+func TestLoginRehashesOldSettings(t *testing.T) {
+	st, svc, cleanup := newTestStoreAndAuth(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	u, _, _, err := svc.Setup(ctx, svc.SetupCode(), "admin", "Admin", "AdminSecret123!", "Mozilla", "127.0.0.1")
+	if err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	// A hash made with the old 64 MiB, t=3, p=2 settings.
+	salt := []byte("0123456789abcdef")
+	key := argon2.IDKey([]byte("AdminSecret123!"), salt, 3, 64*1024, 2, 32)
+	old := fmt.Sprintf("$argon2id$v=19$m=65536,t=3,p=2$%s$%s",
+		base64.RawStdEncoding.EncodeToString(salt), base64.RawStdEncoding.EncodeToString(key))
+	if err := st.UpdateUserPassword(ctx, u.ID, old, false); err != nil {
+		t.Fatalf("UpdateUserPassword: %v", err)
+	}
+
+	if _, err := svc.VerifyUserCredentials(ctx, "admin", "AdminSecret123!", "127.0.0.1"); err != nil {
+		t.Fatalf("login with old hash: %v", err)
+	}
+	got, err := st.GetUserByID(ctx, u.ID)
+	if err != nil {
+		t.Fatalf("GetUserByID: %v", err)
+	}
+	if NeedsRehash(got.PassHash) {
+		t.Fatalf("hash not re-saved: %s", got.PassHash[:30])
+	}
+	if _, err := svc.VerifyUserCredentials(ctx, "admin", "AdminSecret123!", "127.0.0.1"); err != nil {
+		t.Fatalf("login with new hash: %v", err)
 	}
 }

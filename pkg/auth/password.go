@@ -16,9 +16,12 @@ import (
 )
 
 const (
-	argonMemory    = 64 * 1024 // 64 MiB = 65536 KiB
-	argonTime      = 3
-	argonThreads   = 2
+	// Light settings for the small pilot box (412 MB RAM): 64 MiB per login
+	// pushed it into swap and logins took 20 s. Older hashes keep their own
+	// settings and are re-saved with these at the next sign-in.
+	argonMemory    = 8 * 1024 // 8 MiB = 8192 KiB
+	argonTime      = 1
+	argonThreads   = 1
 	argonKeyLen    = 32
 	argonSaltLen   = 16
 	minPasswordLen = 10
@@ -83,7 +86,7 @@ func ValidatePassword(password string) error {
 	return nil
 }
 
-// HashPassword hashes a password using Argon2id with 64 MiB, t=3, p=2.
+// HashPassword hashes a password using Argon2id with 8 MiB, t=1, p=1.
 func HashPassword(password string) (string, error) {
 	if len(password) < minPasswordLen {
 		return "", ErrPasswordTooShort
@@ -107,6 +110,13 @@ func HashPassword(password string) (string, error) {
 
 	return fmt.Sprintf("$argon2id$v=%d$m=%d,t=%d,p=%d$%s$%s",
 		argonVersion, argonMemory, argonTime, argonThreads, b64Salt, b64Key), nil
+}
+
+// NeedsRehash reports whether an encoded hash was made with other settings
+// than the current ones.
+func NeedsRehash(encodedHash string) bool {
+	return !strings.HasPrefix(encodedHash, fmt.Sprintf("$argon2id$v=%d$m=%d,t=%d,p=%d$",
+		argonVersion, argonMemory, argonTime, argonThreads))
 }
 
 // VerifyPassword checks if a password matches the standard encoded Argon2id hash.
