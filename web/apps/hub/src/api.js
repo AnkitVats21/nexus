@@ -1,13 +1,77 @@
 // Nexus Hub API Client
-// All writes use Content-Type: application/json for the hub's CSRF Origin validation.
-// All requests include session credentials.
+// The dashboard signs in like the app: a 15-minute access token and a 30-day
+// rotating refresh token, both kept in localStorage so a reload stays signed in.
+// Writes use Content-Type: application/json.
+
+const TOKENS_KEY = 'nexus.hub.tokens';
+
+function loadTokens() {
+  try {
+    const t = JSON.parse(localStorage.getItem(TOKENS_KEY) || 'null');
+    return t && t.access && t.refresh ? t : null;
+  } catch {
+    return null;
+  }
+}
+
+export function saveTokens(res) {
+  try {
+    localStorage.setItem(TOKENS_KEY, JSON.stringify({ access: res.access_token, refresh: res.refresh_token }));
+  } catch {
+    // Storage blocked: this tab stays signed in until reload.
+  }
+  memTokens = { access: res.access_token, refresh: res.refresh_token };
+}
+
+export function clearTokens() {
+  try {
+    localStorage.removeItem(TOKENS_KEY);
+  } catch {
+    // ignore
+  }
+  memTokens = null;
+}
+
+let memTokens = loadTokens();
+const tokens = () => loadTokens() || memTokens;
+
+// One refresh at a time: refresh tokens rotate, and reusing one revokes the family.
+let refreshing = null;
+async function refreshTokens(rejectedAccess) {
+  const cur = tokens();
+  if (!cur) return false;
+  if (cur.access !== rejectedAccess) return true; // another tab or call already refreshed
+  if (!refreshing) {
+    refreshing = (async () => {
+      const res = await fetch('/hub/api/auth/refresh', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ refresh_token: cur.refresh }),
+      });
+      if (!res.ok) {
+        if (res.status === 401) clearTokens();
+        return false;
+      }
+      saveTokens(await res.json());
+      return true;
+    })().catch(() => false).finally(() => { refreshing = null; });
+  }
+  return refreshing;
+}
+
+async function send(path, opts) {
+  const t = tokens();
+  const headers = { ...opts.headers };
+  if (t) headers.Authorization = `Bearer ${t.access}`;
+  const res = await fetch(path, { ...opts, headers });
+  return { res, access: t?.access };
+}
 
 export async function request(path, options = {}) {
   const { method = 'GET', json, headers = {}, ...rest } = options;
   const opts = {
     method,
     headers: { ...headers },
-    credentials: 'include',
     ...rest,
   };
 
@@ -16,7 +80,11 @@ export async function request(path, options = {}) {
     opts.headers['Content-Type'] = 'application/json';
   }
 
-  const res = await fetch(path, opts);
+  let { res, access } = await send(path, opts);
+  if (res.status === 401 && access && await refreshTokens(access)) {
+    ({ res } = await send(path, opts));
+  }
+
 
   // Parse JSON response body if present
   let data = null;
@@ -62,8 +130,12 @@ export async function request(path, options = {}) {
 // Hub Auth & User API
 export const getSetupStatus = () => request('/hub/api/setup');
 export const postSetup = (form) => request('/hub/api/setup', { method: 'POST', json: form });
-export const postLogin = (creds) => request('/hub/api/login', { method: 'POST', json: creds });
-export const postLogout = () => request('/hub/api/logout', { method: 'POST', json: {} });
+export const postToken = (creds) => request('/hub/api/auth/token', { method: 'POST', json: creds });
+export const postLogout = () => {
+  const t = tokens();
+  return request('/hub/api/auth/logout', { method: 'POST', json: { refresh_token: t?.refresh || '' } });
+};
+export const hasTokens = () => !!tokens();
 export const getMe = () => request('/hub/api/me');
 export const changePassword = (current, next) => request('/hub/api/me/password', { method: 'POST', json: { current, new: next } });
 

@@ -1,5 +1,8 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
-import { getMe, postLogin, postLogout, postSetup, changePassword as apiChangePassword, getSetupStatus } from './api';
+import {
+  getMe, postToken, postLogout, postSetup, changePassword as apiChangePassword, getSetupStatus,
+  saveTokens, clearTokens, hasTokens,
+} from './api';
 
 const AuthContext = createContext(null);
 
@@ -21,6 +24,10 @@ export function AuthProvider({ children }) {
       }
       setSetupNeeded(false);
 
+      if (!hasTokens()) {
+        setUser(null);
+        return;
+      }
       const me = await getMe();
       setUser(me);
       setMustChange(!!me.must_change);
@@ -53,11 +60,13 @@ export function AuthProvider({ children }) {
     };
   }, [checkAuth]);
 
+  // Signs in for tokens, then reads the full profile (the token reply has no must_change).
   const login = async (username, password) => {
-    const res = await postLogin({ username, password });
-    setUser(res.user);
-    setMustChange(!!res.user.must_change);
-    return res.user;
+    saveTokens(await postToken({ username, password }));
+    const me = await getMe();
+    setUser(me);
+    setMustChange(!!me.must_change);
+    return me;
   };
 
   const logout = async () => {
@@ -66,23 +75,24 @@ export function AuthProvider({ children }) {
     } catch {
       // Ignore logout failure
     }
+    clearTokens();
     setUser(null);
     setMustChange(false);
   };
 
   const setupAdmin = async (form) => {
-    const res = await postSetup(form);
+    await postSetup(form);
     setSetupNeeded(false);
-    setUser(res.user);
-    setMustChange(!!res.user.must_change);
-    return res.user;
+    return login(form.username, form.password);
   };
 
   const updatePassword = async (current, next) => {
     await apiChangePassword(current, next);
-    setMustChange(false);
+    // A password change revokes every refresh token, so sign in again with the new one.
     if (user) {
-      setUser({ ...user, must_change: false });
+      await login(user.username, next);
+    } else {
+      setMustChange(false);
     }
   };
 
