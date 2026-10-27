@@ -47,6 +47,9 @@ type sessionStartMsg struct {
 	KeepaliveS int            `json:"keepalive_s"`
 	ResumeMin  int            `json:"resume_min"`
 	Text       string         `json:"text"`
+	// A new conversation (the board switched assistant profile): the setup
+	// changed, so no kept connection and no resumption.
+	Fresh bool `json:"fresh"`
 }
 
 type geminiConn struct {
@@ -343,7 +346,11 @@ func (v *voiceSession) startSession(m sessionStartMsg) {
 	if v.b != nil {
 		v.b.voiceQ.flush()
 	}
-	if gc := v.gc; gc != nil && gc.ready && !v.handoff && gc.model == modelName(m.Setup) {
+	if m.Fresh {
+		v.handle = ""
+		v.forceResume = false
+	}
+	if gc := v.gc; gc != nil && gc.ready && !v.handoff && !m.Fresh && gc.model == modelName(m.Setup) {
 		v.log.Info("Voice session on the kept connection")
 		v.announceLocked()
 		v.flushPendingLocked()

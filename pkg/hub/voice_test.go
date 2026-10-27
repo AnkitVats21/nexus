@@ -243,6 +243,27 @@ func TestVoiceSession(t *testing.T) {
 	if r, _ := setups[1]["sessionResumption"].(map[string]any); r["handle"] != "h1" {
 		t.Fatalf("resumption: %v", setups[1]["sessionResumption"])
 	}
+
+	// A fresh session (another profile) within keepalive_s: a new connection,
+	// not resumed, even though the connection was kept.
+	write(t, ctx, conn, map[string]any{"type": "session_end"})
+	write(t, ctx, conn, map[string]any{"type": "session_start", "setup": boardSetup(), "keepalive_s": 60,
+		"resume_min": 60})
+	br.next(ctx, "session_ready")
+	write(t, ctx, conn, map[string]any{"type": "session_end"})
+	time.Sleep(50 * time.Millisecond)
+	write(t, ctx, conn, map[string]any{"type": "session_start", "setup": boardSetup(), "keepalive_s": 60,
+		"resume_min": 0, "fresh": true})
+	if m := br.next(ctx, "session_ready"); m["resumed"] == true {
+		t.Fatalf("fresh session resumed: %v", m)
+	}
+	conns, setups, _ = g.snapshot()
+	if conns != 4 {
+		t.Fatalf("gemini connections %d, want 4 (fresh never takes the kept one)", conns)
+	}
+	if r, _ := setups[3]["sessionResumption"].(map[string]any); r["handle"] != nil {
+		t.Fatalf("fresh setup resumes: %v", setups[3]["sessionResumption"])
+	}
 }
 
 func TestVoiceQueueFlush(t *testing.T) {
