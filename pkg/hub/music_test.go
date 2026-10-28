@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -378,5 +379,33 @@ func TestMusicCache(t *testing.T) {
 	}
 	if !small.Has("x1") || !small.Has("x3") {
 		t.Error("x1 and x3 should be kept")
+	}
+}
+
+// A speaker joining or leaving updates the board's list of them (what
+// music_output lists when Gemini runs on the board).
+func TestMusicPlayersFollowEdges(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	srv := newMusicHub(t, nil)
+	board := connectEdge(t, ctx, srv.URL, "board", boardRoles)
+	names := func(s map[string]any) []string {
+		var out []string
+		for _, p := range s["players"].([]any) {
+			out = append(out, p.(map[string]any)["name"].(string))
+		}
+		sort.Strings(out)
+		return out
+	}
+	if got := names(board.next(ctx, "music_state")); len(got) != 1 || got[0] != "board" {
+		t.Fatalf("players %v", got)
+	}
+	orbit := connectEdge(t, ctx, srv.URL, "speaker", map[string]any{"player": map[string]any{"url": true}})
+	if got := names(board.next(ctx, "music_state")); len(got) != 2 || got[1] != "speaker" {
+		t.Fatalf("after join %v", got)
+	}
+	orbit.conn.Close(websocket.StatusNormalClosure, "")
+	if got := names(board.next(ctx, "music_state")); len(got) != 1 {
+		t.Fatalf("after leave %v", got)
 	}
 }

@@ -79,6 +79,13 @@ func newMusic(h *Hub, src TrackSource) *Music {
 // Edges
 
 func (m *Music) edgeJoined(e *edge) {
+	if e.roles.Player != nil {
+		// A new speaker: every controller's list of them changes.
+		m.mu.Lock()
+		m.broadcastLocked()
+		m.mu.Unlock()
+		return
+	}
 	if e.roles.Controller {
 		m.mu.Lock()
 		msg := m.stateMsgLocked()
