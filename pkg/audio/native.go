@@ -215,6 +215,10 @@ func (p *NativePlayer) notify() {
 
 var errSuperseded = errors.New("superseded")
 
+// ErrOutput wraps failures of the audio output (aplay exited: e.g. the
+// Bluetooth speaker went away), as opposed to the stream.
+var ErrOutput = errors.New("audio output")
+
 // retryable: the connection, not the file or the output.
 type netError struct{ err error }
 
@@ -399,7 +403,7 @@ func (p *NativePlayer) stream(ctx context.Context, gen uint64, url string, start
 		if out == nil {
 			o, err := p.open()
 			if err != nil {
-				return fmt.Errorf("audio output: %w", err)
+				return fmt.Errorf("%w: %w", ErrOutput, err)
 			}
 			p.mu.Lock()
 			if gen != p.gen || p.paused {
@@ -427,7 +431,7 @@ func (p *NativePlayer) stream(ctx context.Context, gen uint64, url string, start
 			if paused {
 				continue // Pause closed it
 			}
-			return fmt.Errorf("audio output: %w", err)
+			return fmt.Errorf("%w: %w", ErrOutput, err)
 		}
 	}
 
@@ -445,7 +449,7 @@ func (p *NativePlayer) stream(ctx context.Context, gen uint64, url string, start
 			gone := gen != p.gen
 			p.mu.Unlock()
 			if !gone {
-				return fmt.Errorf("audio output: %w", err)
+				return fmt.Errorf("%w: %w", ErrOutput, err)
 			}
 		}
 	}

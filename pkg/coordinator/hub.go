@@ -33,8 +33,9 @@ func (c *Coordinator) hubHello() {
 		"type": "hello", "proto": hubProto, "id": c.cfg.SatelliteID, "name": c.cfg.SatelliteName,
 		"kind": "orbit", "fw": "nexus-orbit", "token": c.cfg.HubToken,
 		"roles": map[string]any{
-			// mpv plays the hub's stream URL, or resolves a video id itself.
-			"player": map[string]any{"url": true, "resolves": true, "queue_copy": false},
+			// mpv plays the hub's stream URL, or resolves a video id itself;
+			// the native player takes the hub's URL (it can't use yt-dlp).
+			"player": map[string]any{"url": true, "resolves": c.cfg.Player != "native", "queue_copy": false},
 		},
 	})
 }

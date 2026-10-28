@@ -28,6 +28,17 @@ type Config struct {
 	// /api/orbit/ws), and its token (the first line of the token file).
 	HubURL   string
 	HubToken string
+	// The player: "mpv" (default), or "native" (WebM/Opus decoded here,
+	// played with aplay on AudioDevice; for a Pi without mpv).
+	Player      string
+	AudioDevice string
+	// Join only while a Bluetooth speaker is connected (and leave when it
+	// goes); with NameFromBluetooth the satellite takes the speaker's name.
+	RequireBluetooth  bool
+	NameFromBluetooth bool
+	// Serve the Bluetooth API (pair, connect; pkg/bluetooth) on this
+	// address, e.g. 127.0.0.1:8390 for the hub's /hub/bluetooth proxy.
+	BluetoothAPI string
 }
 
 // LoadConfig parses flags, environment variables, and sensible defaults.
@@ -56,6 +67,11 @@ func LoadConfig() (*Config, error) {
 	flag.StringVar(&cfg.TestVideoID, "play", "", "Play a specific YouTube videoId immediately on launch (for testing)")
 	flag.StringVar(&cfg.LogLevel, "log-level", getEnv("LOG_LEVEL", "info"), "Logging level (debug, info, warn, error)")
 	flag.StringVar(&cfg.HubURL, "hub", getEnv("NEXUS_HUB", ""), "Join a nexus-hub as an edge, e.g. ws://host:8380/hub/edge (default $NEXUS_HUB; empty = the board's /api/orbit/ws)")
+	flag.StringVar(&cfg.Player, "player", getEnv("ORBIT_PLAYER", "mpv"), "Audio player: mpv, or native (WebM/Opus through aplay; no mpv needed)")
+	flag.StringVar(&cfg.AudioDevice, "audio-device", getEnv("ORBIT_AUDIO_DEVICE", "default"), "ALSA device for --player=native (e.g. bluealsa)")
+	flag.BoolVar(&cfg.RequireBluetooth, "require-bluetooth", getEnvBool("ORBIT_REQUIRE_BLUETOOTH", false), "Join only while a Bluetooth speaker is connected")
+	flag.BoolVar(&cfg.NameFromBluetooth, "name-from-bluetooth", getEnvBool("ORBIT_NAME_FROM_BLUETOOTH", false), "Use the connected Bluetooth speaker's name as the satellite name")
+	flag.StringVar(&cfg.BluetoothAPI, "bluetooth-api", getEnv("ORBIT_BLUETOOTH_API", ""), "Serve the Bluetooth pairing API on this address (e.g. 127.0.0.1:8390; empty = off)")
 	home, _ := os.UserHomeDir()
 	hubTokenFile := flag.String("hub-token-file", filepath.Join(home, ".config", "nexus", "hub_tokens"), "Hub token (first line)")
 
@@ -71,6 +87,16 @@ func LoadConfig() (*Config, error) {
 				cfg.HubToken = line
 				break
 			}
+		}
+	}
+
+	if cfg.Player != "mpv" && cfg.Player != "native" {
+		return nil, fmt.Errorf("--player must be mpv or native, not %q", cfg.Player)
+	}
+	if cfg.Player == "native" {
+		cfg.AutoSpawnMPV = false
+		if cfg.ResolverType == "auto" {
+			cfg.ResolverType = "invidious" // "direct" hands mpv a page URL; only stream URLs play here
 		}
 	}
 
