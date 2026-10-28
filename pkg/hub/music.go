@@ -715,7 +715,16 @@ func (m *Music) toolCall(from *edge, name string, args json.RawMessage) json.Raw
 		if a.Target != "" {
 			chosen, err := m.selectOutput(from, a.Target)
 			if err == nil {
-				return mustJSON(map[string]any{"status": "success", "now_playing_on": chosen})
+				res := map[string]any{"status": "success", "now_playing_on": chosen}
+				m.mu.Lock()
+				if m.cur == nil || m.state == "idle" {
+					// Nothing moved: say so, or Gemini announces a transfer.
+					delete(res, "now_playing_on")
+					res["output"] = chosen
+					res["message"] = "Nothing is playing, so nothing moved; the next song plays on " + chosen + "."
+				}
+				m.mu.Unlock()
+				return mustJSON(res)
 			}
 		}
 		m.mu.Lock()

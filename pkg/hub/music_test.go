@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"encoding/json"
 	"context"
 	"io"
 	"net/http"
@@ -407,5 +408,35 @@ func TestMusicPlayersFollowEdges(t *testing.T) {
 	orbit.conn.Close(websocket.StatusNormalClosure, "")
 	if got := names(board.next(ctx, "music_state")); len(got) != 1 {
 		t.Fatalf("after leave %v", got)
+	}
+}
+
+// A speaker switch with nothing playing tells Gemini nothing moved;
+// with a song playing it moves it.
+func TestMusicOutputNothingPlaying(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	h := New(Config{Version: "test", Tokens: []string{testToken}, Tracks: &fakeTracks{}})
+	srv := httptest.NewServer(h.Handler())
+	t.Cleanup(srv.Close)
+	board := connectEdge(t, ctx, srv.URL, "board", boardRoles)
+	connectEdge(t, ctx, srv.URL, "workstation", orbitRoles)
+	time.Sleep(30 * time.Millisecond)
+	call := func(target string) map[string]any {
+		h.music.mu.Lock()
+		from := h.music.edgeLocked("board")
+		h.music.mu.Unlock()
+		var res map[string]any
+		json.Unmarshal(h.music.toolCall(from, "music_output", json.RawMessage(`{"target":"`+target+`"}`)), &res)
+		return res
+	}
+	if res := call("workstation"); res["now_playing_on"] != nil || res["output"] != "workstation" || res["message"] == nil {
+		t.Fatalf("nothing playing: %v", res)
+	}
+
+	write(t, ctx, board.conn, map[string]any{"type": "music_action", "action": "play", "query": "alpha"})
+	time.Sleep(50 * time.Millisecond)
+	if res := call("here"); res["now_playing_on"] != "board" || res["message"] != nil {
+		t.Fatalf("playing: %v", res)
 	}
 }
