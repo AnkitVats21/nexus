@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"nexus/pkg/hub"
 	"nexus/pkg/tools"
 	"os"
@@ -47,6 +48,7 @@ func main() {
 		"Invidious-compatible API (invidious-daemon) for music lookups, after MCP (default $NEXUS_INVIDIOUS_URL)")
 	cacheDir := flag.String("cache-dir", filepath.Join(home, ".cache", "nexus-hub", "music"), "songs kept for the players")
 	cacheMB := flag.Int("cache-max-mb", 2048, "music cache size (0 = no cache)")
+	btAPI := flag.String("bluetooth-api", "", "Orbit's Bluetooth API to offer the dashboard at /hub/bluetooth (e.g. http://127.0.0.1:8390; empty = none)")
 	debug := flag.Bool("debug", false, "debug logging")
 	flag.Parse()
 
@@ -148,8 +150,15 @@ func main() {
 			cache = nil
 		}
 	}
+	var bt *url.URL
+	if *btAPI != "" {
+		if bt, err = url.Parse(*btAPI); err != nil || bt.Host == "" {
+			log.Error("Bad --bluetooth-api", "url", *btAPI)
+			os.Exit(1)
+		}
+	}
 	h := hub.New(hub.Config{Version: version, Tokens: tokens, WebDir: *webDir, Log: log,
-		GeminiKey: geminiKey, Uplink: *uplink, MCP: mcp, Tracks: tracks, Cache: cache})
+		GeminiKey: geminiKey, Uplink: *uplink, MCP: mcp, Tracks: tracks, Cache: cache, BluetoothAPI: bt})
 	srv := &http.Server{Addr: *listen, Handler: h.Handler(), ReadHeaderTimeout: 10 * time.Second}
 
 	ln, err := net.Listen("tcp", *listen)

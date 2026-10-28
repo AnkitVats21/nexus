@@ -79,6 +79,9 @@ type Config struct {
 	Tracks TrackSource
 	// Songs kept for the players (nil = none; they stream from YouTube).
 	Cache *MusicCache
+	// Orbit's Bluetooth API on this machine (cmd/orbit --bluetooth-api),
+	// served to the dashboard at /hub/bluetooth; nil = none.
+	BluetoothAPI *url.URL
 }
 
 type Hub struct {
@@ -189,6 +192,23 @@ func (h *Hub) Handler() http.Handler {
 	mux.HandleFunc(EdgePath, h.serveEdge)
 	mux.HandleFunc(BoardPath, h.serveEdge)
 	mux.HandleFunc("/hub/status", h.serveStatus)
+	if h.cfg.BluetoothAPI != nil {
+		// /hub/bluetooth[/...] -> <api>/bluetooth[/...]
+		bt := &httputil.ReverseProxy{
+			Rewrite: func(pr *httputil.ProxyRequest) {
+				pr.SetURL(h.cfg.BluetoothAPI)
+				pr.Out.URL.Path = strings.TrimPrefix(pr.In.URL.Path, "/hub")
+				pr.Out.URL.RawPath = ""
+			},
+			ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadGateway)
+				w.Write([]byte(`{"status":"error","message":"Orbit (Bluetooth) is not running"}`))
+			},
+		}
+		mux.Handle("/hub/bluetooth", bt)
+		mux.Handle("/hub/bluetooth/", bt)
+	}
 	if h.cfg.Cache != nil {
 		mux.Handle(CachePath, h.cfg.Cache)
 	}
@@ -619,7 +639,7 @@ func (h *Hub) serveWeb(w http.ResponseWriter, r *http.Request) {
 func (h *Hub) serveStatus(w http.ResponseWriter, r *http.Request) {
 	h.mu.Lock()
 	status := map[string]any{"version": h.cfg.Version, "browsers": len(h.browsers), "voice": h.voiceEnabled(),
-		"music": h.music != nil}
+		"music": h.music != nil, "bluetooth": h.cfg.BluetoothAPI != nil}
 	if b := h.board; b != nil {
 		status["board"] = map[string]any{
 			"id": b.id, "name": b.name, "fw": b.fw, "api": b.apiBase.String(),
