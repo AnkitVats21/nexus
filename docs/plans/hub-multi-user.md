@@ -219,8 +219,7 @@ service.
 
 ### 10.4 App
 
-Later: the app is one more edge with `voice` and a `call` role; calling home
-from the phone works the same way.
+The app is one more edge with `voice`, `player`, `controller` and `call` roles: see `~/ai-assistant/nexus-app/docs/PLAN.md`.
 
 ## 11. Protocol changes (proto 3)
 
@@ -244,6 +243,26 @@ from the phone works the same way.
 
 Each milestone: plan reviewed first, hub tests, the board unchanged in
 standalone mode.
+
+## 12a. Additions for the app and the music catalog (2026-10-16)
+
+Agreed when the music backend and the Android app were merged into Nexus
+(`~/ai-assistant/nexus-app/docs/PLAN.md`, `~/ai-assistant/invidious-daemon/docs/PLAN-v2.md`):
+
+- **Self sign-up with approval:** anyone can register (username and password). The account is `pending` and can do nothing until an admin approves it. The first admin is created with a CLI command on the host, never through sign-up. An admin resets passwords; the user must change the password at next login.
+- **Tokens for apps,** beside the dashboard's cookie login:
+  - A 15-minute access JWT signed with Ed25519 (EdDSA).
+  - A 30-day refresh token: opaque, stored hashed, rotated on every use.
+  - Disabling a user deletes their refresh tokens.
+  - The music catalog verifies the JWT with the hub's public key alone.
+- **App device registration:** a logged-in app registers itself as the user's device and gets a device token. No pairing code is needed; boards keep using pairing codes.
+- **The library lives here:** likes, playlists, history and queue are per-user hub data (M4). The catalog keeps no state.
+- **Where the hub runs (supersedes the WireGuard and Caddy idea in §9):**
+  - On the HP (`ankitm-home`) at home: always on, with the home IP for YouTube.
+  - Remote edges reach it through nginx on Lightsail over Tailscale.
+  - Measure Cloudflare routing (Marseille on 2026-10-07) before relying on it.
+- **Opus downlink** for remote edges: phone voice sessions on mobile data, not only calls.
+- **Push (FCM)** to ring a closed app for calls and to notify about missed calls and messages.
 
 ## 13. Open questions
 
