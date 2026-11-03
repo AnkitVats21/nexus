@@ -476,3 +476,48 @@ func TestMusicOutputNothingPlaying(t *testing.T) {
 		t.Fatalf("playing: %v", res)
 	}
 }
+
+func TestMusicCarriesOnAfterSpeakerLossReport(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	srv := newMusicHub(t, nil)
+	board := connectEdge(t, ctx, srv.URL, "board", boardRoles)
+	orbit := connectEdge(t, ctx, srv.URL, "workstation", orbitRoles)
+	write(t, ctx, board.conn, map[string]any{"type": "music_action", "action": "output", "target": "work"})
+	write(t, ctx, board.conn, map[string]any{"type": "music_action", "action": "play", "query": "alpha"})
+	p := orbit.next(ctx, "music_play")
+	write(t, ctx, orbit.conn, map[string]any{"type": "music_report", "seq": p["seq"], "id": "a", "state": "playing", "position_ms": 7000})
+	// Its speaker goes: the player pauses by itself, then leaves.
+	write(t, ctx, orbit.conn, map[string]any{"type": "music_report", "seq": p["seq"], "id": "a", "state": "paused", "position_ms": 7500})
+	time.Sleep(50 * time.Millisecond)
+	orbit.conn.Close(websocket.StatusNormalClosure, "")
+	if p := board.next(ctx, "music_play"); p["position_ms"] != float64(7500) {
+		t.Fatalf("board carries on: %v", p)
+	}
+}
+
+func TestMusicPausedByPersonStaysPausedWhenSpeakerLeaves(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	srv := newMusicHub(t, nil)
+	board := connectEdge(t, ctx, srv.URL, "board", boardRoles)
+	orbit := connectEdge(t, ctx, srv.URL, "workstation", orbitRoles)
+	write(t, ctx, board.conn, map[string]any{"type": "music_action", "action": "output", "target": "work"})
+	write(t, ctx, board.conn, map[string]any{"type": "music_action", "action": "play", "query": "alpha"})
+	p := orbit.next(ctx, "music_play")
+	write(t, ctx, orbit.conn, map[string]any{"type": "music_report", "seq": p["seq"], "id": "a", "state": "playing", "position_ms": 7000})
+	write(t, ctx, board.conn, map[string]any{"type": "music_action", "action": "pause"})
+	orbit.next(ctx, "music_pause")
+	write(t, ctx, orbit.conn, map[string]any{"type": "music_report", "seq": p["seq"], "id": "a", "state": "paused", "position_ms": 7100})
+	time.Sleep(50 * time.Millisecond)
+	orbit.conn.Close(websocket.StatusNormalClosure, "")
+	for {
+		s := board.next(ctx, "music_state")
+		if s["output"] == "" {
+			if s["state"] != "idle" && s["state"] != "paused" {
+				t.Fatalf("after a pause: %v", s)
+			}
+			break
+		}
+	}
+}

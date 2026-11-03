@@ -90,11 +90,18 @@ type Music struct {
 	// back to it if it rejoins before returnUntil.
 	returnTo    string
 	returnUntil time.Time
+	// When the music last played or was started, and not since stopped or
+	// paused by the hub: a player that loses its speaker reports paused or
+	// idle just before it leaves, and that music should still carry on.
+	playingAt time.Time
 }
 
 // How long a player that went away while playing gets the music back when it
 // rejoins (a speaker swap takes a few seconds; a reconnect, longer).
 const musicReturnWindow = 30 * time.Second
+
+// A player leaving within this of the music playing there: it was playing.
+const musicJustPlayed = 3 * time.Second
 
 func newMusic(h *Hub, src TrackSource) *Music {
 	return &Music{h: h, src: src, log: h.log.With("component", "music"), state: "idle", repeat: "off",
@@ -144,7 +151,8 @@ func (m *Music) edgeLeft(e *edge) {
 		m.log.Info("Player left; it carries on with its queue copy", "player", e.id)
 	} else {
 		m.output = ""
-		playing := m.cur != nil && (m.state == "playing" || m.state == "buffering" || m.state == "resolving")
+		playing := m.cur != nil && (m.state == "playing" || m.state == "buffering" || m.state == "resolving" ||
+			time.Since(m.playingAt) < musicJustPlayed)
 		if !playing {
 			m.log.Info("Player left; its music stops", "player", e.id)
 			m.state = "idle"
@@ -431,6 +439,7 @@ func (m *Music) control(what string) {
 	}
 	switch what {
 	case "pause":
+		m.playingAt = time.Time{}
 		m.held = false
 		m.sessionPaused = false
 		if out != nil {
@@ -468,6 +477,7 @@ func (m *Music) control(what string) {
 			m.posMs = 0
 		}
 	case "stop":
+		m.playingAt = time.Time{}
 		m.gen++
 		m.queue = nil
 		m.cur = nil
@@ -581,6 +591,9 @@ func (m *Music) report(e *edge, r musicReport) {
 	if r.State == "playing" {
 		m.skips = 0
 	}
+	if r.State == "playing" || r.State == "buffering" {
+		m.playingAt = time.Now()
+	}
 	m.broadcastLocked()
 }
 
@@ -590,6 +603,7 @@ func (m *Music) event(e *edge, seq uint64, id, ev, reason string) {
 	if e.id != m.output || seq != m.seq || m.cur == nil || (id != "" && id != m.cur.ID) {
 		return
 	}
+	m.playingAt = time.Time{}
 	switch ev {
 	case "ended":
 		m.nextLocked(false)
@@ -854,6 +868,11 @@ func (m *Music) startTrackLocked(out *edge, t Track) {
 
 func (m *Music) startAtLocked(out *edge, t Track, posMs int64, paused bool) {
 	m.gen++
+	if paused {
+		m.playingAt = time.Time{}
+	} else {
+		m.playingAt = time.Now()
+	}
 	url := ""
 	if m.needsURL(out) && !m.h.cfg.Cache.Has(t.ID) {
 		if u, ok := m.urls[t.ID]; ok && time.Since(u.at) < musicURLMaxAge {
