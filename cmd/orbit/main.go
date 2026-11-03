@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -104,6 +105,14 @@ func main() {
 	// only when it can play.
 	var sessionMu sync.Mutex
 	var coord *coordinator.Coordinator
+	var endVolume context.CancelFunc
+	// Each speaker's last level, put back when it comes up at 0.
+	stateDir := os.Getenv("XDG_STATE_HOME")
+	if stateDir == "" {
+		home, _ := os.UserHomeDir()
+		stateDir = filepath.Join(home, ".local", "state")
+	}
+	levelsPath := filepath.Join(stateDir, "nexus-orbit", "speaker_volumes.json")
 	startSession := func() {
 		sessionMu.Lock()
 		defer sessionMu.Unlock()
@@ -121,7 +130,14 @@ func main() {
 		// A Bluetooth speaker's own volume (remembered per speaker), when
 		// PipeWire is there; else the player's.
 		if sv := (audio.SinkVolume{}); cfg.HubURL != "" && cfg.RequireBluetooth && sv.Available() {
-			coord.SetVolumeControl(sv)
+			speakerMu.Lock()
+			mac := speaker.MAC
+			speakerMu.Unlock()
+			rv := &audio.RememberedVolume{Inner: sv, Path: levelsPath, Key: mac}
+			var vctx context.Context
+			vctx, endVolume = context.WithCancel(ctx)
+			rv.Begin(vctx)
+			coord.SetVolumeControl(rv)
 		}
 		if err := coord.Start(); err != nil {
 			slog.Error("Failed to start coordinator", "err", err)
@@ -131,6 +147,10 @@ func main() {
 	stopSession := func() {
 		sessionMu.Lock()
 		defer sessionMu.Unlock()
+		if endVolume != nil {
+			endVolume()
+			endVolume = nil
+		}
 		if coord != nil {
 			coord.Stop() // stops the music and leaves the hub
 			coord = nil
