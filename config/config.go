@@ -36,6 +36,9 @@ type Config struct {
 	// goes); with NameFromBluetooth the satellite takes the speaker's name.
 	RequireBluetooth  bool
 	NameFromBluetooth bool
+	// With RequireBluetooth: keep one speaker connected, disconnecting a
+	// second one (pkg/bluetooth Ctl.OneSpeaker).
+	OneSpeaker bool
 	// Serve the Bluetooth API (pair, connect; pkg/bluetooth) on this
 	// address, e.g. 127.0.0.1:8390 for the hub's /hub/bluetooth proxy.
 	BluetoothAPI string
@@ -71,6 +74,7 @@ func LoadConfig() (*Config, error) {
 	flag.StringVar(&cfg.AudioDevice, "audio-device", getEnv("ORBIT_AUDIO_DEVICE", "default"), "ALSA device for --player=native (e.g. bluealsa)")
 	flag.BoolVar(&cfg.RequireBluetooth, "require-bluetooth", getEnvBool("ORBIT_REQUIRE_BLUETOOTH", false), "Join only while a Bluetooth speaker is connected")
 	flag.BoolVar(&cfg.NameFromBluetooth, "name-from-bluetooth", getEnvBool("ORBIT_NAME_FROM_BLUETOOTH", false), "Use the connected Bluetooth speaker's name as the satellite name")
+	flag.BoolVar(&cfg.OneSpeaker, "one-speaker", getEnvBool("ORBIT_ONE_SPEAKER", true), "With --require-bluetooth: keep one speaker connected; a second one is disconnected (the chosen one wins, else the one in use)")
 	flag.StringVar(&cfg.BluetoothAPI, "bluetooth-api", getEnv("ORBIT_BLUETOOTH_API", ""), "Serve the Bluetooth pairing API on this address (e.g. 127.0.0.1:8390; empty = off)")
 	home, _ := os.UserHomeDir()
 	hubTokenFile := flag.String("hub-token-file", filepath.Join(home, ".config", "nexus", "hub_tokens"), "Hub token (first line)")

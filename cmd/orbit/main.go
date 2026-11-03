@@ -78,7 +78,7 @@ func main() {
 	slog.Info("Stream resolver initialized", "driver", res.Name())
 
 	// 3. Bluetooth: the pairing API, and the speaker that gates the session.
-	bt := &bluetooth.Ctl{}
+	bt := &bluetooth.Ctl{OneSpeaker: cfg.RequireBluetooth && cfg.OneSpeaker}
 	var speakerMu sync.Mutex
 	var speaker bluetooth.Device
 	var haveSpeaker bool
@@ -118,6 +118,11 @@ func main() {
 			slog.Info("Running in STANDALONE mode (Nexus Core connection disabled)")
 		}
 		coord = coordinator.NewCoordinator(cfg, trans, res, player)
+		// A Bluetooth speaker's own volume (remembered per speaker), when
+		// PipeWire is there; else the player's.
+		if sv := (audio.SinkVolume{}); cfg.HubURL != "" && cfg.RequireBluetooth && sv.Available() {
+			coord.SetVolumeControl(sv)
+		}
 		if err := coord.Start(); err != nil {
 			slog.Error("Failed to start coordinator", "err", err)
 			os.Exit(1)

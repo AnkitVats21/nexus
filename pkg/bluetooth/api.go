@@ -117,8 +117,10 @@ func (a *API) action(name string) http.HandlerFunc {
 			mac := body.MAC
 			label = name + " " + mac
 			job = map[string]func(context.Context) error{
-				"pair":       func(ctx context.Context) error { return a.Ctl.Pair(ctx, mac) },
-				"connect":    func(ctx context.Context) error { return a.Ctl.Connect(ctx, mac) },
+				// The speaker chosen here takes over from the one in use
+				// (Ctl.OneSpeaker).
+				"pair":       func(ctx context.Context) error { a.Ctl.Prefer(mac); return a.Ctl.Pair(ctx, mac) },
+				"connect":    func(ctx context.Context) error { a.Ctl.Prefer(mac); return a.Ctl.Connect(ctx, mac) },
 				"disconnect": func(ctx context.Context) error { return a.Ctl.Disconnect(ctx, mac) },
 				"remove":     func(ctx context.Context) error { return a.Ctl.Remove(ctx, mac) },
 			}[name]

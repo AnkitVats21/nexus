@@ -50,6 +50,27 @@ func TestParseInfo(t *testing.T) {
 	}
 }
 
+func TestAudioClass(t *testing.T) {
+	// A speaker found by a scan: no UUIDs and no icon yet, only its class.
+	d := parseInfo("CB:4E:FC:8F:A9:0C", "Device CB:4E:FC:8F:A9:0C (public)\n\tName: Tribit StormBox 2\n\tClass: 0x00240404 (2360324)\n\tPaired: no\n")
+	if !d.Audio {
+		t.Fatalf("speaker by class: %+v", d)
+	}
+	for cod, want := range map[uint32]bool{
+		0x240404: true,  // wearable headset (Aavante Bar, Tribit)
+		0x240414: true,  // loudspeaker
+		0x240418: true,  // headphones
+		0x200410: false, // microphone
+		0x240438: false, // camcorder
+		0x5a020c: false, // smartphone
+		0x002580: false, // mouse
+	} {
+		if audioClass(cod) != want {
+			t.Errorf("audioClass(%#x) = %v, want %v", cod, !want, want)
+		}
+	}
+}
+
 func TestParseLists(t *testing.T) {
 	devs := parseDeviceList("Device 11:22:33:44:55:66 JBL Flip 5\nDevice AA:BB:CC:DD:EE:FF Phone\n[CHG] noise\n")
 	if len(devs) != 2 || devs[0].Name != "JBL Flip 5" {
@@ -73,6 +94,7 @@ case "$1" in
 show) cat "$d/show" ;;
 devices) if [ "$2" = Connected ]; then cat "$d/connected" 2>/dev/null || true; else cat "$d/devices"; fi ;;
 info) cat "$d/info-$2" 2>/dev/null || exit 1 ;;
+disconnect) grep -v "$2" "$d/connected" > "$d/connected.tmp"; mv "$d/connected.tmp" "$d/connected" ;;
 *) exit 0 ;;
 esac
 `
@@ -118,6 +140,58 @@ func TestWatch(t *testing.T) {
 	// A connected phone (not a sink) doesn't count.
 	os.WriteFile(filepath.Join(dir, "connected"), []byte("Device AA:BB:CC:DD:EE:FF Phone\n"), 0o644)
 	expect("down")
+}
+
+// With OneSpeaker a second speaker is disconnected: the one in use stays,
+// unless the other was chosen (Prefer).
+func TestWatchOneSpeaker(t *testing.T) {
+	ctl, dir := fakeCtl(t)
+	ctl.OneSpeaker = true
+	os.WriteFile(filepath.Join(dir, "info-22:22:22:22:22:22"), []byte(strings.ReplaceAll(
+		strings.ReplaceAll(infoSpeaker, "JBL Flip 5", "Aavante Bar"), "11:22:33:44:55:66", "22:22:22:22:22:22")), 0o644)
+	connected := func(lines ...string) {
+		os.WriteFile(filepath.Join(dir, "connected"), []byte(strings.Join(lines, "")), 0o644)
+	}
+	jbl, bar := "Device 11:22:33:44:55:66 JBL Flip 5\n", "Device 22:22:22:22:22:22 Aavante Bar\n"
+	connected(jbl)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	events := make(chan string, 10)
+	go ctl.Watch(ctx, 20*time.Millisecond, nil, func(d Device, ok bool) { events <- d.Name })
+	expect := func(want string) {
+		t.Helper()
+		select {
+		case got := <-events:
+			if got != want {
+				t.Fatalf("got %q, want %q", got, want)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatalf("no %q", want)
+		}
+	}
+	waitConnected := func(want string) {
+		t.Helper()
+		for i := 0; i < 150; i++ {
+			if b, _ := os.ReadFile(filepath.Join(dir, "connected")); string(b) == want {
+				return
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		b, _ := os.ReadFile(filepath.Join(dir, "connected"))
+		t.Fatalf("connected %q, want %q", b, want)
+	}
+	expect("JBL Flip 5")
+
+	// The soundbar reconnects by itself: it is let go, the JBL stays.
+	connected(jbl, bar)
+	waitConnected(jbl)
+
+	// The soundbar is chosen: the JBL goes and the soundbar takes over.
+	ctl.Prefer("22:22:22:22:22:22")
+	connected(jbl, bar)
+	waitConnected(bar)
+	expect("Aavante Bar")
 }
 
 func TestAPI(t *testing.T) {

@@ -96,6 +96,9 @@ func (g *fakeGemini) serve(w http.ResponseWriter, r *http.Request) {
 			case "remote":
 				send(map[string]any{"toolCall": map[string]any{"functionCalls": []any{
 					map[string]any{"id": "t2", "name": "get_news", "args": map[string]any{}}}}})
+			case "bluetooth":
+				send(map[string]any{"toolCall": map[string]any{"functionCalls": []any{
+					map[string]any{"id": "t4", "name": "bluetooth", "args": map[string]any{"action": "status"}}}}})
 			}
 		}
 	}

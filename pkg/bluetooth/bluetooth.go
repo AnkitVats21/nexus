@@ -10,9 +10,11 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"log/slog"
 	"os/exec"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -38,6 +40,27 @@ type Adapter struct {
 // Ctl runs bluetoothctl.
 type Ctl struct {
 	Path string // default "bluetoothctl"
+	// OneSpeaker: Watch keeps at most one audio sink connected and
+	// disconnects the others, so the speaker Orbit is named after is the
+	// one the music plays on.
+	OneSpeaker bool
+
+	mu       sync.Mutex
+	prefer   string // the speaker last chosen (Prefer), wins over the others
+	preferAt time.Time
+}
+
+// preferFor is how long a chosen speaker wins while it is not connected yet
+// (pairing and connecting take seconds); once connected it wins until it
+// goes.
+const preferFor = 2 * time.Minute
+
+// Prefer marks mac as the speaker the user chose (connect or pair): with
+// OneSpeaker, Watch keeps it and lets the others go.
+func (c *Ctl) Prefer(mac string) {
+	c.mu.Lock()
+	c.prefer, c.preferAt = mac, time.Now()
+	c.mu.Unlock()
 }
 
 var (
@@ -160,6 +183,13 @@ func parseInfo(mac, out string) Device {
 			if strings.HasPrefix(v, "audio-") {
 				d.Audio = true
 			}
+		case "Class":
+			// "0x00240404 (2360324)": a discovered device may list no
+			// UUIDs before pairing, but its class says what it is.
+			var cod uint32
+			if _, err := fmt.Sscanf(v, "0x%x", &cod); err == nil && audioClass(cod) {
+				d.Audio = true
+			}
 		case "UUID":
 			if strings.HasPrefix(v, "Audio Sink") || strings.Contains(v, "0000110b-") {
 				d.Audio = true
@@ -178,25 +208,86 @@ func parseInfo(mac, out string) Device {
 	return d
 }
 
+// audioClass reports whether a Class of Device is something that plays
+// audio: major class Audio/Video with a speaker-like minor class (headset,
+// hands-free, loudspeaker, headphones, portable, car, HiFi). Microphones,
+// cameras and displays share the major class and are left out.
+func audioClass(cod uint32) bool {
+	if (cod>>8)&0x1f != 0x04 {
+		return false
+	}
+	switch (cod >> 2) & 0x3f {
+	case 0x01, 0x02, 0x05, 0x06, 0x07, 0x08, 0x0a:
+		return true
+	}
+	return false
+}
+
 // ConnectedSink is the first connected audio sink, if any.
 func (c *Ctl) ConnectedSink(ctx context.Context) (Device, bool, error) {
-	devs, err := c.Devices(ctx, "Connected")
-	if err != nil {
+	sinks, err := c.connectedSinks(ctx)
+	if err != nil || len(sinks) == 0 {
 		return Device{}, false, err
 	}
+	return sinks[0], true, nil
+}
+
+func (c *Ctl) connectedSinks(ctx context.Context) ([]Device, error) {
+	devs, err := c.Devices(ctx, "Connected")
+	if err != nil {
+		return nil, err
+	}
+	var sinks []Device
 	for _, d := range devs {
 		if d.Connected && d.Audio {
-			return d, true, nil
+			sinks = append(sinks, d)
 		}
 	}
-	return Device{}, false, nil
+	return sinks, nil
+}
+
+// pick chooses the speaker to keep among the connected sinks: the one the
+// user chose (Prefer), else the one in use (cur), else the first. A speaker
+// that reconnects by itself (a trusted one, switched on) does not take over.
+func (c *Ctl) pick(sinks []Device, cur Device, have bool) (Device, bool) {
+	if len(sinks) == 0 {
+		return Device{}, false
+	}
+	c.mu.Lock()
+	prefer := c.prefer
+	if prefer != "" && !hasMAC(sinks, prefer) && time.Since(c.preferAt) > preferFor {
+		c.prefer, prefer = "", ""
+	}
+	c.mu.Unlock()
+	for _, mac := range []string{prefer, cur.MAC} {
+		if mac == "" || (mac == cur.MAC && !have) {
+			continue
+		}
+		for _, d := range sinks {
+			if d.MAC == mac {
+				return d, true
+			}
+		}
+	}
+	return sinks[0], true
+}
+
+func hasMAC(devs []Device, mac string) bool {
+	for _, d := range devs {
+		if d.MAC == mac {
+			return true
+		}
+	}
+	return false
 }
 
 // Scan discovers devices for d (bluetoothctl keeps discovery on while it
-// runs). Blocks until done.
+// runs). Blocks until done. BR/EDR only: speakers play A2DP over classic
+// Bluetooth, and most of what an LE scan finds (phones, watches, tags) is
+// not one.
 func (c *Ctl) Scan(ctx context.Context, d time.Duration) error {
 	secs := fmt.Sprint(int(d.Seconds()))
-	_, err := c.run(ctx, d+10*time.Second, "--timeout", secs, "scan", "on")
+	_, err := c.run(ctx, d+10*time.Second, "--timeout", secs, "scan", "bredr")
 	return err
 }
 
@@ -261,18 +352,32 @@ func lastLine(s string) string {
 // Watch polls for a connected audio sink every interval and calls fn when
 // it changes: (device, true) when one connects (or a different one takes
 // over), (Device{}, false) when it goes. The first poll always reports; a
-// send on poke polls at once. Returns when ctx ends.
+// send on poke polls at once. With OneSpeaker it disconnects every sink but
+// the one it reports (pick). Returns when ctx ends.
 func (c *Ctl) Watch(ctx context.Context, interval time.Duration, poke <-chan struct{}, fn func(Device, bool)) {
 	var cur Device
 	var have, first = false, true
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	for {
-		d, ok, err := c.ConnectedSink(ctx)
-		if err == nil && (first || ok != have || (ok && d.MAC != cur.MAC)) {
-			first = false
-			cur, have = d, ok
-			fn(d, ok)
+		sinks, err := c.connectedSinks(ctx)
+		if err == nil {
+			d, ok := c.pick(sinks, cur, have)
+			if c.OneSpeaker {
+				for _, o := range sinks {
+					if o.MAC != d.MAC {
+						slog.Info("One speaker at a time: disconnecting", "speaker", o.Name, "keeping", d.Name)
+						if err := c.Disconnect(ctx, o.MAC); err != nil {
+							slog.Warn("Could not disconnect a second speaker", "speaker", o.Name, "err", err)
+						}
+					}
+				}
+			}
+			if first || ok != have || (ok && d.MAC != cur.MAC) {
+				first = false
+				cur, have = d, ok
+				fn(d, ok)
+			}
 		}
 		select {
 		case <-ctx.Done():

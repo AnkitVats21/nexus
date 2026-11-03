@@ -95,6 +95,7 @@ type Hub struct {
 	browsers  map[*browser]struct{}
 
 	music *Music
+	bt    *Bluetooth // the bluetooth voice tool; nil without BluetoothAPI
 
 	transcript *Transcript
 	voices     map[string]*voiceSession // by board id
@@ -117,6 +118,7 @@ type edge struct {
 	since   time.Time
 	voiceQ  *voiceQueue
 	voice   *voiceSession
+	volume  int // a player's volume_state, -1 = not reported; guarded by Hub.mu
 }
 
 // edgeRoles are the roles an edge takes (docs/PROTOCOL.md section 2); nil
@@ -181,6 +183,9 @@ func New(cfg Config) *Hub {
 	}
 	if cfg.Tracks != nil {
 		h.music = newMusic(h, cfg.Tracks)
+	}
+	if cfg.BluetoothAPI != nil {
+		h.bt = newBluetooth(cfg.BluetoothAPI)
 	}
 	return h
 }
@@ -271,7 +276,7 @@ func (h *Hub) serveEdge(w http.ResponseWriter, r *http.Request) {
 		conn: conn, send: make(chan []byte, boardQueueLen), cancel: cancel,
 		id: hello.ID, name: hello.Name, kind: hello.Kind, fw: hello.FW, roles: *roles, legacy: hello.Roles == nil,
 		since: time.Now(), voiceQ: newVoiceQueue(conn, h.cfg.VoiceLead),
-		base: "http://" + r.Host,
+		base: "http://" + r.Host, volume: -1,
 	}
 	if b.name == "" {
 		b.name = b.id
@@ -399,7 +404,7 @@ func (h *Hub) fromBoard(b *edge, data []byte) {
 		h.broadcast(data, true)
 	case "session_start", "text_turn", "tool_response", "interrupt", "session_end":
 		b.voice.fromBoard(head.Type, data)
-	case "voice_activity", "music_action", "music_report", "music_event", "music_renew", "music_sync":
+	case "voice_activity", "music_action", "music_report", "music_event", "music_renew", "music_sync", "volume_state":
 		if h.music != nil {
 			h.music.fromEdge(b, head.Type, data)
 		}
@@ -512,8 +517,20 @@ func (h *Hub) fromBrowser(br *browser, data []byte) {
 	var cmd struct {
 		Cmd        string `json:"cmd"`
 		Transcript bool   `json:"transcript"`
+		Target     string `json:"target"`
+		Value      int    `json:"value"`
 	}
 	if err := json.Unmarshal(data, &cmd); err != nil || cmd.Cmd == "" {
+		return
+	}
+	if cmd.Cmd == "speaker_volume" {
+		// A hub speaker's volume (the board's own goes to the board as
+		// "volume").
+		if h.music != nil {
+			if err := h.music.setVolume(cmd.Target, cmd.Value); err != nil {
+				h.log.Warn("Speaker volume", "target", cmd.Target, "err", err)
+			}
+		}
 		return
 	}
 	if cmd.Cmd == "subscribe" {
@@ -648,8 +665,12 @@ func (h *Hub) serveStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	var edges []map[string]any
 	for _, e := range h.edges {
-		edges = append(edges, map[string]any{"id": e.id, "name": e.name, "kind": e.kind, "fw": e.fw,
-			"roles": e.roles.String(), "connected_s": int(time.Since(e.since).Seconds())})
+		ed := map[string]any{"id": e.id, "name": e.name, "kind": e.kind, "fw": e.fw,
+			"roles": e.roles.String(), "connected_s": int(time.Since(e.since).Seconds())}
+		if e.volume >= 0 {
+			ed["volume"] = e.volume
+		}
+		edges = append(edges, ed)
 	}
 	status["edges"] = edges
 	h.mu.Unlock()

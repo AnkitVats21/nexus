@@ -81,6 +81,7 @@ type voiceSession struct {
 	start         sessionStartMsg
 	boardTools    map[string]bool
 	musicTools    bool // the hub's music tools replace the edge's
+	btTool        bool // the hub's bluetooth tool (Orbit's speakers here)
 	handle        string
 	handleAt      time.Time
 	forceResume   bool
@@ -321,6 +322,10 @@ func (v *voiceSession) startSession(m sessionStartMsg) {
 		}
 		v.h.music.voiceActive(v.id, true)
 	}
+	v.btTool = v.h.bt != nil
+	if v.btTool {
+		delete(v.boardTools, bluetoothToolName)
+	}
 	if v.b != nil {
 		v.uplinkFormat = v.b.voiceUp
 		v.opusAllowed = (v.b.voiceUp == "opus")
@@ -452,6 +457,15 @@ func (v *voiceSession) buildSetupLocked() ([]byte, *geminiConn) {
 		for _, d := range musicToolDeclarations() {
 			decls = append(decls, d)
 		}
+	}
+	if v.btTool {
+		kept := decls[:0]
+		for _, d := range decls {
+			if dm, _ := d.(map[string]any); dm == nil || dm["name"] != bluetoothToolName {
+				kept = append(kept, d)
+			}
+		}
+		decls = append(kept, bluetoothToolDeclaration())
 	}
 	if gc.search {
 		// get_weather is the fallback for models without search.
@@ -644,6 +658,11 @@ func (v *voiceSession) onGemini(gc *geminiConn, data []byte) {
 				go v.callMusic(gc, fc.ID, fc.Name, fc.Args)
 				continue
 			}
+			if v.btTool && fc.Name == bluetoothToolName {
+				v.sendBoardLocked(map[string]any{"type": "reply_owed"})
+				go v.callBluetooth(gc, fc.ID, fc.Args)
+				continue
+			}
 			if !v.boardTools[fc.Name] && v.h.cfg.MCP.Has(fc.Name) {
 				v.sendBoardLocked(map[string]any{"type": "reply_owed"})
 				go v.callMCP(gc, fc.ID, fc.Name, fc.Args)
@@ -819,6 +838,17 @@ func (v *voiceSession) callMCP(gc *geminiConn, id, name string, args json.RawMes
 	t0 := time.Now()
 	res := v.h.cfg.MCP.Call(ctx, name, args)
 	v.log.Info("MCP tool", "name", name, "ms", time.Since(t0).Milliseconds(), "bytes", len(res))
+	v.sendToolResponse(gc, id, res)
+}
+
+// callBluetooth runs the bluetooth tool. Unlike a music command it keeps
+// the session open: a status or scan is usually followed by "connect that".
+func (v *voiceSession) callBluetooth(gc *geminiConn, id string, args json.RawMessage) {
+	ctx, cancel := context.WithTimeout(context.Background(), btToolTimeout)
+	defer cancel()
+	t0 := time.Now()
+	res := v.h.bt.toolCall(ctx, args)
+	v.log.Info("Bluetooth tool", "args", string(args), "ms", time.Since(t0).Milliseconds(), "result", string(res))
 	v.sendToolResponse(gc, id, res)
 }
 

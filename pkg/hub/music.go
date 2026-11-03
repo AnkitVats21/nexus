@@ -141,6 +141,18 @@ func (m *Music) fromEdge(e *edge, typ string, data []byte) {
 				m.report(e, r)
 			}
 		}
+	case "volume_state":
+		var v struct {
+			Volume *int `json:"volume"`
+		}
+		if e.roles.Player != nil && json.Unmarshal(data, &v) == nil && v.Volume != nil {
+			m.h.mu.Lock()
+			e.volume = max(0, min(100, *v.Volume))
+			m.h.mu.Unlock()
+			m.mu.Lock()
+			m.broadcastLocked()
+			m.mu.Unlock()
+		}
 	case "music_event":
 		if e.roles.Player != nil {
 			var ev struct {
@@ -975,6 +987,27 @@ func (m *Music) pickOutputLocked(from *edge) *edge {
 	return pick
 }
 
+// setVolume sets a hub speaker's volume (0-100) by its id or name: the
+// player sets it and answers with volume_state. The board's own volume is
+// the board's ("volume" on its control channel), not this.
+func (m *Music) setVolume(target string, vol int) error {
+	m.mu.Lock()
+	to := m.matchPlayerLocked(nil, target)
+	m.mu.Unlock()
+	if to == nil {
+		return fmt.Errorf("no speaker matches %q", target)
+	}
+	m.h.mu.Lock()
+	board := to == m.h.board
+	m.h.mu.Unlock()
+	if board {
+		return errors.New("the board's volume is set on the board")
+	}
+	m.log.Info("Speaker volume", "player", to.id, "volume", vol)
+	m.sendTo(to, map[string]any{"type": "music_volume", "volume": max(0, min(100, vol))})
+	return nil
+}
+
 func (m *Music) matchPlayerLocked(from *edge, target string) *edge {
 	t := strings.ToLower(strings.TrimSpace(target))
 	if t == "" {
@@ -1057,7 +1090,11 @@ func (m *Music) stateMsgLocked() map[string]any {
 	var players []map[string]any
 	for _, e := range m.h.edges {
 		if e.roles.Player != nil {
-			players = append(players, map[string]any{"id": e.id, "name": e.name, "kind": e.kind})
+			p := map[string]any{"id": e.id, "name": e.name, "kind": e.kind}
+			if e.volume >= 0 {
+				p["volume"] = e.volume
+			}
+			players = append(players, p)
 		}
 	}
 	m.h.mu.Unlock()

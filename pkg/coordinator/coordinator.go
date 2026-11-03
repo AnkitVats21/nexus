@@ -36,6 +36,12 @@ type Coordinator struct {
 	wantPaused bool
 	hubSeq     uint64 // hub mode: the music_play being played
 
+	// Hub mode: the speaker's volume (SetVolumeControl), reported to the
+	// hub when it changes; nil = the player's own volume.
+	volume      VolumeControl
+	volumeWatch sync.Once
+	lastVolume  int // last reported; guarded by stateMu
+
 	ctx    context.Context
 	cancel context.CancelFunc
 }

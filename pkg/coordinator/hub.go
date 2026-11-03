@@ -1,8 +1,10 @@
 package coordinator
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
+	"time"
 
 	"nexus/pkg/protocol"
 	"nexus/pkg/resolver"
@@ -50,6 +52,19 @@ func (c *Coordinator) handleHubMessage(data []byte) {
 	switch head.Type {
 	case "welcome":
 		c.log.Info("Joined the hub", "hub", string(data))
+		c.hubVolumeReport(true)
+		c.volumeWatch.Do(func() { go c.hubVolumeLoop() })
+	case "music_volume":
+		var m struct {
+			Volume int `json:"volume"`
+		}
+		if json.Unmarshal(data, &m) == nil {
+			c.log.Info("Hub: volume", "volume", m.Volume)
+			if err := c.setVolume(m.Volume); err != nil {
+				c.log.Warn("Could not set the volume", "err", err)
+			}
+			c.hubVolumeReport(true)
+		}
 	case "rejected":
 		c.log.Error("The hub refused this satellite (token?)", "msg", string(data))
 	case "music_play":
@@ -93,6 +108,66 @@ func (c *Coordinator) handleHubMessage(data []byte) {
 		}
 		if json.Unmarshal(data, &m) == nil {
 			_ = c.player.SeekTo(m.PositionMs)
+		}
+	}
+}
+
+// VolumeControl is the volume Orbit reports and the hub sets: the speaker's
+// own (audio.SinkVolume) rather than the player's.
+type VolumeControl interface {
+	Get(ctx context.Context) (int, error)
+	Set(ctx context.Context, vol int) error
+}
+
+// SetVolumeControl makes v the volume the hub sees and sets.
+func (c *Coordinator) SetVolumeControl(v VolumeControl) { c.volume = v }
+
+func (c *Coordinator) setVolume(vol int) error {
+	if c.volume != nil {
+		return c.volume.Set(c.ctx, vol)
+	}
+	return c.player.SetVolume(vol)
+}
+
+func (c *Coordinator) getVolume() (int, bool) {
+	if c.volume != nil {
+		v, err := c.volume.Get(c.ctx)
+		return v, err == nil
+	}
+	st, err := c.player.GetStatus()
+	if err != nil {
+		return 0, false
+	}
+	return st.Volume, true
+}
+
+// hubVolumeReport sends volume_state when the volume changed (or always,
+// with force: after joining, or after the hub set it).
+func (c *Coordinator) hubVolumeReport(force bool) {
+	v, ok := c.getVolume()
+	if !ok {
+		return
+	}
+	c.stateMu.Lock()
+	changed := force || v != c.lastVolume
+	c.lastVolume = v
+	c.stateMu.Unlock()
+	if changed {
+		c.sendJSON(map[string]any{"type": "volume_state", "volume": v})
+	}
+}
+
+// hubVolumeLoop reports volume changes made elsewhere (the speaker's
+// buttons, another app) every few seconds.
+func (c *Coordinator) hubVolumeLoop() {
+	t := time.NewTicker(3 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-c.ctx.Done():
+			return
+		case <-t.C:
+			c.hubVolumeReport(false)
 		}
 	}
 }
