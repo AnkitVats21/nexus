@@ -83,8 +83,10 @@ type Config struct {
 	// served to the dashboard at /hub/bluetooth; nil = none.
 	BluetoothAPI *url.URL
 	// Serve the directory of home hubs (directory.go): the page at
-	// DirectoryPath (put a login in front of it) and AnnouncePath.
-	Directory bool
+	// DirectoryPath and AnnouncePath. The page lists only the hubs on the
+	// viewer's network, unless DirectoryAll (then put a login in front of it).
+	Directory    bool
+	DirectoryAll bool
 }
 
 type Hub struct {
@@ -192,7 +194,7 @@ func New(cfg Config) *Hub {
 		h.bt = newBluetooth(cfg.BluetoothAPI)
 	}
 	if cfg.Directory {
-		h.dir = newDirectory(h.tokenOK)
+		h.dir = newDirectory(h.tokenOK, cfg.DirectoryAll)
 	}
 	return h
 }

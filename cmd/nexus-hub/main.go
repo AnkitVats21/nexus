@@ -50,7 +50,8 @@ func main() {
 	cacheMB := flag.Int("cache-max-mb", 2048, "music cache size (0 = no cache)")
 	btAPI := flag.String("bluetooth-api", "", "Orbit's Bluetooth API to offer the dashboard at /hub/bluetooth (e.g. http://127.0.0.1:8390; empty = none)")
 	directory := flag.Bool("directory", false,
-		"serve the directory of home hubs at "+hub.DirectoryPath+" (public server; put a login in front of it)")
+		"serve the directory of home hubs at "+hub.DirectoryPath+" (public server; it shows each viewer the hubs on their own network)")
+	directoryAll := flag.Bool("directory-all", false, "the directory also lists the hubs on other networks (put a login in front of it)")
 	announceURL := flag.String("announce-url", "", "a directory to announce this hub to every minute (e.g. https://hub.wiztex.in; empty = none)")
 	announceTokenFile := flag.String("announce-token-file", filepath.Join(home, ".config", "nexus", "announce_token"),
 		"a hub token of the directory's hub")
@@ -166,7 +167,7 @@ func main() {
 	}
 	h := hub.New(hub.Config{Version: version, Tokens: tokens, WebDir: *webDir, Log: log,
 		GeminiKey: geminiKey, Uplink: *uplink, MCP: mcp, Tracks: tracks, Cache: cache, BluetoothAPI: bt,
-		Directory: *directory})
+		Directory: *directory, DirectoryAll: *directoryAll})
 	srv := &http.Server{Addr: *listen, Handler: h.Handler(), ReadHeaderTimeout: 10 * time.Second}
 
 	ln, err := net.Listen("tcp", *listen)

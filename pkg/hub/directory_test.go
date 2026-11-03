@@ -39,7 +39,7 @@ func listFrom(t *testing.T, h http.Handler, from string) []DirectoryHub {
 }
 
 func TestDirectoryAnnounceAndMatch(t *testing.T) {
-	h := New(Config{Tokens: []string{testToken}, Directory: true})
+	h := New(Config{Tokens: []string{testToken}, Directory: true, DirectoryAll: true})
 	now := time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
 	h.dir.now = func() time.Time { return now }
 	srv := h.Handler()
@@ -91,6 +91,18 @@ func TestDirectoryAnnounceAndMatch(t *testing.T) {
 	now = now.Add(directoryForget)
 	if hubs := listFrom(t, srv, "203.0.113.5"); len(hubs) != 0 {
 		t.Fatalf("forgotten: %+v", hubs)
+	}
+}
+
+func TestDirectoryShowsOnlyHereWithoutAll(t *testing.T) {
+	srv := New(Config{Tokens: []string{testToken}, Directory: true}).Handler()
+	announceReq(t, srv, testToken, "203.0.113.5", `{"name":"hp","lan_url":"http://192.168.1.5:8380/"}`)
+	announceReq(t, srv, testToken, "198.51.100.7", `{"name":"pi","lan_url":"http://192.168.0.9:8380/"}`)
+	if hubs := listFrom(t, srv, "203.0.113.5"); len(hubs) != 1 || hubs[0].Name != "hp" || !hubs[0].Here {
+		t.Fatalf("home viewer: %+v", hubs)
+	}
+	if hubs := listFrom(t, srv, "192.0.2.1"); len(hubs) != 0 {
+		t.Fatalf("stranger sees: %+v", hubs)
 	}
 }
 

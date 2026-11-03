@@ -60,7 +60,7 @@ IPv6 names, no new DNS or certificates.
   small instance of the hub binary on Lightsail (127.0.0.1:8381,
   `packaging/systemd/nexus-directory.service`), next to the pilot hub,
   which stays as it is. nginx (`packaging/nginx/hub-directory.conf`) routes
-  only `/hub/directory` (behind the existing basic auth) and
+  only `/hub/directory` (no login) and
   `/hub/directory/announce` to it.
 - **Announce** (`pkg/hub/announce.go`, `--announce-url`,
   `--announce-token-file`, `--name`): each home hub POSTs
@@ -70,13 +70,15 @@ IPv6 names, no new DNS or certificates.
   DHCP address shows up within a minute.
 - **"On this network"**: the viewer's public address (CF-Connecting-IP via
   X-Real-IP, trusted from loopback only) equals the hub's public IPv4, or
-  shares its IPv6 /64. The list is behind the login, so neighbours behind
-  the same CGNAT address see nothing.
+  shares its IPv6 /64. No login (owner's choice, 2026-11-03): a viewer sees
+  only the hubs on their own network, never the others. Someone behind the
+  same CGNAT address would see a hub's name and private address, of no use
+  outside the home. `--directory-all` lists every hub (put a login in front).
 - In memory only: online while heard from within 3 min; forgotten after 7
   days; a directory restart empties the list for a minute.
 - Limits: plain `http://` to the hub (no secure context: no mic in the
-  browser); hubs elsewhere are listed but their links work only on their
-  own network (the relay is the later step).
+  browser); hubs on other networks aren't shown (reaching them is the relay,
+  the later step).
 
 ## Security baseline (done 2026-11-02)
 

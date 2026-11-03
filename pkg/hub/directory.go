@@ -20,8 +20,10 @@ import (
 // on the viewer's network when it announced from the same public IPv4
 // address, or from the same IPv6 /64.
 //
-// The page has no login of its own: put it behind one (nginx basic auth).
-// Announces need a hub token (Config.Tokens).
+// Without a login in front of it (the default), the page shows only the
+// hubs on the viewer's own network: a name and a private address, of use
+// only inside that network. DirectoryAll also lists the others; put a login
+// in front of it then. Announces need a hub token (Config.Tokens).
 
 const (
 	DirectoryPath = "/hub/directory"
@@ -54,14 +56,15 @@ type dirEntry struct {
 
 type directory struct {
 	tokenOK func(string) bool
+	all     bool // list the hubs on other networks too
 	now     func() time.Time
 
 	mu   sync.Mutex
 	hubs map[string]*dirEntry // by name
 }
 
-func newDirectory(tokenOK func(string) bool) *directory {
-	return &directory{tokenOK: tokenOK, now: time.Now, hubs: map[string]*dirEntry{}}
+func newDirectory(tokenOK func(string) bool, all bool) *directory {
+	return &directory{tokenOK: tokenOK, all: all, now: time.Now, hubs: map[string]*dirEntry{}}
 }
 
 // clientAddr is the address a request came from: the proxy's X-Real-IP when
@@ -186,6 +189,9 @@ func (d *directory) list(viewer netip.Addr) []DirectoryHub {
 		online := age <= directoryOnline
 		here := online && ((now.Sub(e.v4Seen) <= directoryAddrTTL && sameNetwork(viewer, e.v4)) ||
 			(now.Sub(e.v6Seen) <= directoryAddrTTL && sameNetwork(viewer, e.v6)))
+		if !here && !d.all {
+			continue
+		}
 		out = append(out, DirectoryHub{Name: e.name, URL: e.lanURL, Version: e.version, Online: online,
 			Here: here, LastSeen: e.seen.UTC().Format(time.RFC3339)})
 	}
