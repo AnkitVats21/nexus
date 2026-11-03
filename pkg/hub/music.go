@@ -31,7 +31,23 @@ const (
 	musicRestartMs     = 3000 // "previous" after this restarts the song
 )
 
-var musicToolNames = map[string]bool{"play": true, "playback": true, "music_output": true}
+var musicToolNames = map[string]bool{"play": true, "playback": true, "music_output": true, "music_status": true}
+
+// musicToolActs: the call changed the music (a command, not a question), so
+// the board ends the session after the reply (end_after_reply).
+func musicToolActs(name string, args json.RawMessage) bool {
+	switch name {
+	case "play", "playback":
+		return true
+	case "music_output":
+		var a struct {
+			Target string `json:"target"`
+		}
+		json.Unmarshal(args, &a)
+		return a.Target != "" // without one it only lists the speakers
+	}
+	return false
+}
 
 type urlEntry struct {
 	url string
@@ -674,6 +690,8 @@ func musicToolDeclarations() []map[string]any {
 		{"name": "music_output", "description": "Moves the music to another speaker, carrying on the current song from where it is: this device ('here'), or another device by its name (a PC, a Raspberry Pi, a phone). Use for 'play it on my PC' or 'bring the music back here'. Without a target it lists the speakers and says where the music plays now. When only one other speaker is connected, any name picks it.",
 			"parameters": map[string]any{"type": "OBJECT", "properties": map[string]any{
 				"target": str("'here', or a speaker's name; omit to list them.")}}},
+		{"name": "music_status", "description": "Says what music is playing (title, artist, position, which speaker) and what is queued next. Use for 'what song is this', 'what's playing', 'what's next in the queue'.",
+			"parameters": map[string]any{"type": "OBJECT", "properties": map[string]any{}}},
 	}
 }
 
@@ -702,7 +720,7 @@ func (m *Music) toolCall(from *edge, name string, args json.RawMessage) json.Raw
 		}
 		if err != nil {
 			if errors.Is(err, ErrTrackNotFound) {
-				return toolError("nothing found for that")
+				return mustJSON(map[string]any{"status": "not_found", "message": "nothing found for that"})
 			}
 			return toolError("music lookup failed")
 		}
@@ -751,8 +769,35 @@ func (m *Music) toolCall(from *edge, name string, args json.RawMessage) json.Raw
 			res["message"] = "no speaker by that name"
 		}
 		return mustJSON(res)
+	case "music_status":
+		return m.statusTool()
 	}
 	return toolError("unknown tool")
+}
+
+// statusTool answers music_status: what plays, where, and what is next.
+func (m *Music) statusTool() json.RawMessage {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	res := map[string]any{"status": "success", "state": m.state, "queue_length": len(m.queue)}
+	if m.cur != nil && m.state != "idle" {
+		res["now_playing"] = map[string]any{
+			"title": m.cur.Title, "artist": m.cur.Artist,
+			"position_s": m.posMs / 1000, "duration_s": m.durMs / 1000,
+		}
+		if out := m.edgeLocked(m.output); out != nil {
+			res["on"] = out.name
+		}
+	}
+	next := []string{}
+	for i, t := range m.queue {
+		if i == 5 {
+			break
+		}
+		next = append(next, t.Title+" by "+t.Artist)
+	}
+	res["up_next"] = next
+	return mustJSON(res)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

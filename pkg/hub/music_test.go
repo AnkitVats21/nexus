@@ -251,7 +251,7 @@ func TestMusicVoiceTool(t *testing.T) {
 			t.Fatalf("the board's play declaration was kept")
 		}
 	}
-	if strings.Join(names, ",") != "set_volume,play,playback,music_output" {
+	if strings.Join(names, ",") != "set_volume,play,playback,music_output,music_status" {
 		t.Fatalf("declarations: %v", names)
 	}
 	var answered bool

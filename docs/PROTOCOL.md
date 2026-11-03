@@ -134,10 +134,10 @@ Hub to edge:
 | reply audio | channel 2, paced at most 1.5 s ahead of playback |
 | `transcription` | `role` (`user` or `model`), `text` |
 | `tool_call` | `id`, `name`, `args`: a tool the edge declared |
-| `reply_owed` | a hub tool is running; a reply is still coming |
+| `reply_owed` | a hub tool is running; a reply is still coming. `name` (the tool) and `kind` (`music`, `bluetooth`, `search`, `info`, `other`), for the edge's progress display; the answer comes as reply audio after the turn that called the tool has ended |
 | `turn_complete`, `interrupted` | in order after the audio before them |
-| `end_after_reply` | after a hub music tool succeeded (once per turn): the edge ends the session once the current reply has played, as after a music command; optional, an edge may ignore it |
-| `session_error` | `reason`; the edge ends the session |
+| `end_after_reply` | after a hub music command succeeded (once per turn; not `music_status` or a speaker listing): the edge ends the session once the current reply has played, as after a music command; optional, an edge may ignore it |
+| `session_error` | `reason` (Gemini's close reason or error text, as it came) and `code` (the WebSocket close code, -1 if none); the edge ends the session and sorts the reason into a kind (quota, auth, model, network) |
 
 **Setup.** `setup` is the Gemini Live setup the edge wants (model, voice,
 prompt, its own tool declarations). The ESP board sends it so its prompt,
@@ -149,7 +149,7 @@ Search, the MCP tools, its own tools and the resumption handle.
 
 | Owner | Tools | How |
 |---|---|---|
-| hub | music: `play`, `playback`, `music_output` | run in the hub's music controller; an edge's declarations with these names are dropped from its setup |
+| hub | music: `play`, `playback`, `music_output`, `music_status` | run in the hub's music controller; an edge's declarations with these names are dropped from its setup |
 | MCP | whatever the MCP server offers | the hub calls the MCP server |
 | edge | the rest of what the edge declares (alarms, volume, recordings ...) | `tool_call` to the edge, `tool_response` back |
 

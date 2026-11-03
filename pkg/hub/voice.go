@@ -654,17 +654,17 @@ func (v *voiceSession) onGemini(gc *geminiConn, data []byte) {
 				continue
 			}
 			if v.musicTools && musicToolNames[fc.Name] {
-				v.sendBoardLocked(map[string]any{"type": "reply_owed"})
+				v.sendBoardLocked(map[string]any{"type": "reply_owed", "name": fc.Name, "kind": "music"})
 				go v.callMusic(gc, fc.ID, fc.Name, fc.Args)
 				continue
 			}
 			if v.btTool && fc.Name == bluetoothToolName {
-				v.sendBoardLocked(map[string]any{"type": "reply_owed"})
+				v.sendBoardLocked(map[string]any{"type": "reply_owed", "name": fc.Name, "kind": "bluetooth"})
 				go v.callBluetooth(gc, fc.ID, fc.Args)
 				continue
 			}
 			if !v.boardTools[fc.Name] && v.h.cfg.MCP.Has(fc.Name) {
-				v.sendBoardLocked(map[string]any{"type": "reply_owed"})
+				v.sendBoardLocked(map[string]any{"type": "reply_owed", "name": fc.Name, "kind": mcpToolKind(fc.Name)})
 				go v.callMCP(gc, fc.ID, fc.Name, fc.Args)
 				continue
 			}
@@ -685,7 +685,7 @@ func (v *voiceSession) onGemini(gc *geminiConn, data []byte) {
 	if m.Error != nil {
 		v.log.Error("Gemini error message", "error", string(*m.Error))
 		if v.active {
-			v.sendBoardLocked(map[string]any{"type": "session_error", "reason": "gemini error"})
+			v.sendBoardLocked(map[string]any{"type": "session_error", "reason": "gemini error: " + string(*m.Error)})
 			v.active = false
 		}
 		v.closeGeminiLocked()
@@ -730,9 +730,22 @@ func (v *voiceSession) onGeminiClosed(gc *geminiConn, err error) {
 	}
 	v.handoff = false
 	if v.active {
-		v.sendBoardLocked(map[string]any{"type": "session_error", "reason": reason})
+		// Gemini's close code and reason as they came: the board sorts them
+		// into kinds (quota, auth, model, network).
+		v.sendBoardLocked(map[string]any{"type": "session_error", "reason": reason, "code": code})
 		v.active = false
 	}
+}
+
+// mcpToolKind: what an MCP tool does, for the board's progress display.
+func mcpToolKind(name string) string {
+	switch {
+	case strings.Contains(name, "search"), strings.Contains(name, "news"):
+		return "search"
+	case strings.Contains(name, "weather"):
+		return "info"
+	}
+	return "other"
 }
 
 // handOffLocked moves the session to a new connection resuming the same
@@ -862,7 +875,7 @@ func (v *voiceSession) callMusic(gc *geminiConn, id, name string, args json.RawM
 	var st struct {
 		Status string `json:"status"`
 	}
-	if json.Unmarshal(res, &st) == nil && st.Status == "success" {
+	if json.Unmarshal(res, &st) == nil && st.Status == "success" && musicToolActs(name, args) {
 		// As in direct mode, a music command ends the session once the reply
 		// has played (the music may be on another speaker the mic can hear).
 		v.mu.Lock()
