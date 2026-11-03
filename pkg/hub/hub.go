@@ -17,6 +17,7 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"crypto/subtle"
 	"encoding/json"
@@ -32,6 +33,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/coder/websocket"
 )
@@ -574,6 +576,7 @@ func (h *Hub) browserWriter(ctx context.Context, br *browser) {
 		case <-ctx.Done():
 			return
 		case msg := <-br.send:
+			msg = validText(msg)
 			wctx, cancel := context.WithTimeout(ctx, writeTimeout)
 			err := br.conn.Write(wctx, websocket.MessageText, msg)
 			cancel()
@@ -583,6 +586,19 @@ func (h *Hub) browserWriter(ctx context.Context, br *browser) {
 			}
 		}
 	}
+}
+
+// validText makes a frame from the board fit to send as a WebSocket text
+// frame: browsers drop the connection on invalid UTF-8 ("Could not decode a
+// text frame as UTF-8"). The board copies titles into fixed-size buffers and
+// can cut a multi-byte character in half; the stray bytes are dropped. They
+// are only ever inside JSON strings (the JSON syntax is ASCII), so dropping
+// them leaves the JSON whole.
+func validText(msg []byte) []byte {
+	if utf8.Valid(msg) {
+		return msg
+	}
+	return bytes.ToValidUTF8(msg, nil)
 }
 
 func (h *Hub) queueBrowser(br *browser, msg []byte) {

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/coder/websocket"
 )
@@ -213,5 +214,19 @@ func TestTranscriptCap(t *testing.T) {
 	json.Unmarshal(full.Entries[0], &first)
 	if first.ID != 6 {
 		t.Fatalf("oldest kept id %d, want 6", first.ID)
+	}
+}
+
+func TestValidTextDropsCutCharacter(t *testing.T) {
+	// "भज" with its last character cut after the first byte, as the
+	// board's fixed-size title buffer leaves it.
+	msg := []byte("{\"title\":\"भ\xe0\",\"artist\":\"x\"}")
+	got := validText(msg)
+	if !utf8.Valid(got) || string(got) != "{\"title\":\"भ\",\"artist\":\"x\"}" {
+		t.Fatalf("got %q", got)
+	}
+	ok := []byte(`{"a":"b"}`)
+	if g := validText(ok); &g[0] != &ok[0] {
+		t.Fatal("copied a valid frame")
 	}
 }
