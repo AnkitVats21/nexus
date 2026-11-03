@@ -506,6 +506,7 @@ func TestMusicPausedByPersonStaysPausedWhenSpeakerLeaves(t *testing.T) {
 	p := orbit.next(ctx, "music_play")
 	board := connectEdge(t, ctx, srv.URL, "board", boardRoles)
 	write(t, ctx, orbit.conn, map[string]any{"type": "music_report", "seq": p["seq"], "id": "a", "state": "playing", "position_ms": 7000})
+	time.Sleep(50 * time.Millisecond) // the report first: it comes on another connection than the pause
 	write(t, ctx, board.conn, map[string]any{"type": "music_action", "action": "pause"})
 	orbit.next(ctx, "music_pause")
 	write(t, ctx, orbit.conn, map[string]any{"type": "music_report", "seq": p["seq"], "id": "a", "state": "paused", "position_ms": 7100})
