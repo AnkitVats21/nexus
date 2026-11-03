@@ -168,13 +168,49 @@ func TestMusicOutputSwitch(t *testing.T) {
 		t.Fatalf("satellite music_play: %v", p)
 	}
 
-	// The satellite goes away: its music stops (no queue copy).
+	// The satellite goes away while playing: the music carries on on the
+	// board, from where it was.
+	orbit.conn.Close(websocket.StatusNormalClosure, "")
+	p = board.next(ctx, "music_play")
+	if p["track"].(map[string]any)["id"] != "a" || p["position_ms"] != float64(30000) {
+		t.Fatalf("board carries on: %v", p)
+	}
+	write(t, ctx, board.conn, map[string]any{"type": "music_report", "seq": p["seq"], "id": "a", "state": "playing", "position_ms": 32000})
+	time.Sleep(50 * time.Millisecond)
+
+	// It comes back soon (a speaker swap): the music moves back to it.
+	orbit = connectEdge(t, ctx, srv.URL, "workstation", orbitRoles)
+	board.next(ctx, "music_stop")
+	p = orbit.next(ctx, "music_play")
+	if p["track"].(map[string]any)["id"] != "a" || p["position_ms"] != float64(32000) {
+		t.Fatalf("back on the satellite: %v", p)
+	}
+}
+
+func TestMusicPausesWithNoOtherPlayer(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	srv := newMusicHub(t, nil)
+	ctl := connectEdge(t, ctx, srv.URL, "phone", map[string]any{"controller": true})
+	orbit := connectEdge(t, ctx, srv.URL, "workstation", orbitRoles)
+	write(t, ctx, ctl.conn, map[string]any{"type": "music_action", "action": "play", "query": "alpha"})
+	orbit.next(ctx, "music_play")
+	write(t, ctx, orbit.conn, map[string]any{"type": "music_report", "seq": 1, "id": "a", "state": "playing", "position_ms": 9000})
+	time.Sleep(50 * time.Millisecond)
+
+	// Nowhere else to play: paused, not stopped.
 	orbit.conn.Close(websocket.StatusNormalClosure, "")
 	for {
-		s := board.next(ctx, "music_state")
-		if s["output"] == "" && s["state"] == "idle" {
+		s := ctl.next(ctx, "music_state")
+		if s["output"] == "" && s["state"] == "paused" {
 			break
 		}
+	}
+	// It comes back: still paused there until someone resumes.
+	orbit = connectEdge(t, ctx, srv.URL, "workstation", orbitRoles)
+	write(t, ctx, ctl.conn, map[string]any{"type": "music_action", "action": "resume"})
+	if p := orbit.next(ctx, "music_play"); p["position_ms"] != float64(9000) {
+		t.Fatalf("resume: %v", p)
 	}
 }
 

@@ -84,7 +84,17 @@ type Music struct {
 	// since): it plays again when they are over, wherever it is by then. A
 	// player that has the session pauses and resumes its own music.
 	sessionPaused bool
+
+	// The player the music left when it went away (a Bluetooth speaker
+	// switched off or swapped): the music carries on elsewhere and comes
+	// back to it if it rejoins before returnUntil.
+	returnTo    string
+	returnUntil time.Time
 }
+
+// How long a player that went away while playing gets the music back when it
+// rejoins (a speaker swap takes a few seconds; a reconnect, longer).
+const musicReturnWindow = 30 * time.Second
 
 func newMusic(h *Hub, src TrackSource) *Music {
 	return &Music{h: h, src: src, log: h.log.With("component", "music"), state: "idle", repeat: "off",
@@ -98,6 +108,14 @@ func (m *Music) edgeJoined(e *edge) {
 	if e.roles.Player != nil {
 		// A new speaker: every controller's list of them changes.
 		m.mu.Lock()
+		if e.id == m.returnTo && time.Now().Before(m.returnUntil) && e.id != m.output && m.cur != nil &&
+			m.state != "idle" && m.state != "paused" {
+			m.log.Info("Player is back: the music moves back to it", "player", e.id)
+			m.moveOutputLocked(e)
+		}
+		if e.id == m.returnTo {
+			m.returnTo = ""
+		}
 		m.broadcastLocked()
 		m.mu.Unlock()
 		return
@@ -125,10 +143,29 @@ func (m *Music) edgeLeft(e *edge) {
 		// comes back.
 		m.log.Info("Player left; it carries on with its queue copy", "player", e.id)
 	} else {
-		m.log.Info("Player left; its music stops", "player", e.id)
 		m.output = ""
-		m.state = "idle"
-		m.gen++
+		playing := m.cur != nil && (m.state == "playing" || m.state == "buffering" || m.state == "resolving")
+		if !playing {
+			m.log.Info("Player left; its music stops", "player", e.id)
+			m.state = "idle"
+			m.gen++
+		} else {
+			// Carry on where it was on another player (the board first),
+			// and come back if this one rejoins soon.
+			m.returnTo, m.returnUntil = e.id, time.Now().Add(musicReturnWindow)
+			if to := m.pickOutputLocked(nil); to != nil {
+				m.log.Info("Player left; the music carries on", "player", e.id, "on", to.id)
+				m.output = to.id
+				m.held = m.sessionElsewhereLocked()
+				m.sessionPaused = m.sessionPaused || m.held
+				m.startAtLocked(to, *m.cur, m.posMs, m.held)
+			} else {
+				// Nowhere to play: paused, so "resume" carries on.
+				m.log.Info("Player left; no other player: the music pauses", "player", e.id)
+				m.state = "paused"
+				m.gen++
+			}
+		}
 	}
 	m.broadcastLocked()
 }
@@ -492,12 +529,19 @@ func (m *Music) selectOutput(from *edge, target string) (string, error) {
 	if to.id == m.output {
 		return to.name, nil
 	}
+	m.returnTo = "" // the person chose
+	m.log.Info("Music output", "to", to.id)
+	m.moveOutputLocked(to)
+	return to.name, nil
+}
+
+// moveOutputLocked moves the music to `to`, where it was.
+func (m *Music) moveOutputLocked(to *edge) {
 	old := m.edgeLocked(m.output)
 	m.output = to.id
-	m.log.Info("Music output", "to", to.id)
 	if m.cur == nil || m.state == "idle" {
 		m.broadcastLocked()
-		return to.name, nil
+		return
 	}
 	if old != nil {
 		m.sendLocked(old, map[string]any{"type": "music_stop"})
@@ -507,7 +551,6 @@ func (m *Music) selectOutput(from *edge, target string) (string, error) {
 	userPaused := m.state == "paused" && !m.sessionPaused
 	m.held = m.sessionElsewhereLocked() && !userPaused
 	m.startAtLocked(to, *m.cur, m.posMs, userPaused || m.held)
-	return to.name, nil
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
