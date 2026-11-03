@@ -584,7 +584,12 @@ func (m *Music) report(e *edge, r musicReport) {
 	case "buffering", "playing", "paused", "idle":
 		m.state = r.State
 	}
-	m.posMs = r.PositionMs
+	// While it loads, a player reports 0 (or the old song's place): keep the
+	// place it was asked to start from, so a move right away doesn't
+	// restart the song.
+	if r.State == "playing" || r.State == "paused" {
+		m.posMs = r.PositionMs
+	}
 	if r.DurationMs > 0 {
 		m.durMs = r.DurationMs
 	}

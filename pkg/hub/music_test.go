@@ -1,8 +1,8 @@
 package hub
 
 import (
-	"encoding/json"
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -481,11 +481,11 @@ func TestMusicCarriesOnAfterSpeakerLossReport(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	srv := newMusicHub(t, nil)
-	board := connectEdge(t, ctx, srv.URL, "board", boardRoles)
+	// Played from the speaker itself (it gets it); then the board joins.
 	orbit := connectEdge(t, ctx, srv.URL, "workstation", orbitRoles)
-	write(t, ctx, board.conn, map[string]any{"type": "music_action", "action": "output", "target": "work"})
-	write(t, ctx, board.conn, map[string]any{"type": "music_action", "action": "play", "query": "alpha"})
+	write(t, ctx, orbit.conn, map[string]any{"type": "music_action", "action": "play", "query": "alpha"})
 	p := orbit.next(ctx, "music_play")
+	board := connectEdge(t, ctx, srv.URL, "board", boardRoles)
 	write(t, ctx, orbit.conn, map[string]any{"type": "music_report", "seq": p["seq"], "id": "a", "state": "playing", "position_ms": 7000})
 	// Its speaker goes: the player pauses by itself, then leaves.
 	write(t, ctx, orbit.conn, map[string]any{"type": "music_report", "seq": p["seq"], "id": "a", "state": "paused", "position_ms": 7500})
@@ -500,11 +500,11 @@ func TestMusicPausedByPersonStaysPausedWhenSpeakerLeaves(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	srv := newMusicHub(t, nil)
-	board := connectEdge(t, ctx, srv.URL, "board", boardRoles)
+	// Played from the speaker itself (it gets it); then the board joins.
 	orbit := connectEdge(t, ctx, srv.URL, "workstation", orbitRoles)
-	write(t, ctx, board.conn, map[string]any{"type": "music_action", "action": "output", "target": "work"})
-	write(t, ctx, board.conn, map[string]any{"type": "music_action", "action": "play", "query": "alpha"})
+	write(t, ctx, orbit.conn, map[string]any{"type": "music_action", "action": "play", "query": "alpha"})
 	p := orbit.next(ctx, "music_play")
+	board := connectEdge(t, ctx, srv.URL, "board", boardRoles)
 	write(t, ctx, orbit.conn, map[string]any{"type": "music_report", "seq": p["seq"], "id": "a", "state": "playing", "position_ms": 7000})
 	write(t, ctx, board.conn, map[string]any{"type": "music_action", "action": "pause"})
 	orbit.next(ctx, "music_pause")
@@ -519,5 +519,28 @@ func TestMusicPausedByPersonStaysPausedWhenSpeakerLeaves(t *testing.T) {
 			}
 			break
 		}
+	}
+}
+
+func TestMusicMoveWhileLoadingKeepsPlace(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	srv := newMusicHub(t, nil)
+	// Played from the speaker itself (it gets it); then the board joins.
+	orbit := connectEdge(t, ctx, srv.URL, "workstation", orbitRoles)
+	write(t, ctx, orbit.conn, map[string]any{"type": "music_action", "action": "play", "query": "alpha"})
+	p := orbit.next(ctx, "music_play")
+	board := connectEdge(t, ctx, srv.URL, "board", boardRoles)
+	write(t, ctx, orbit.conn, map[string]any{"type": "music_report", "seq": p["seq"], "id": "a", "state": "playing", "position_ms": 40000})
+	time.Sleep(50 * time.Millisecond)
+	orbit.conn.Close(websocket.StatusNormalClosure, "")
+	// The board starts loading and reports 0 ...
+	p = board.next(ctx, "music_play")
+	write(t, ctx, board.conn, map[string]any{"type": "music_report", "seq": p["seq"], "id": "a", "state": "buffering", "position_ms": 0})
+	time.Sleep(50 * time.Millisecond)
+	// ... and the speaker is back: it carries on from 40 s, not 0.
+	orbit = connectEdge(t, ctx, srv.URL, "workstation", orbitRoles)
+	if p := orbit.next(ctx, "music_play"); p["position_ms"] != float64(40000) {
+		t.Fatalf("back on the speaker: %v", p)
 	}
 }
