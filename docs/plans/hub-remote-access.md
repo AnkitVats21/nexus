@@ -50,6 +50,34 @@ relay on Lightsail when it can't.
 - Cloudflare API token limited to the hub.wiztex.in DNS records; nginx and
   certbot steps on Lightsail are run by the owner.
 
+## Step 1: the directory, LAN links only (built 2026-11-03)
+
+The least-change first step: a list of the hubs, the ones on your current
+network first, each opening the hub at its LAN address. No relay, no
+IPv6 names, no new DNS or certificates.
+
+- **Directory** (`pkg/hub/directory.go`, `nexus-hub --directory`): a second,
+  small instance of the hub binary on Lightsail (127.0.0.1:8381,
+  `packaging/systemd/nexus-directory.service`), next to the pilot hub,
+  which stays as it is. nginx (`packaging/nginx/hub-directory.conf`) routes
+  only `/hub/directory` (behind the existing basic auth) and
+  `/hub/directory/announce` to it.
+- **Announce** (`pkg/hub/announce.go`, `--announce-url`,
+  `--announce-token-file`, `--name`): each home hub POSTs
+  `{name, lan_url, version}` every minute, once over IPv4 and once over
+  IPv6, with a token from the directory's token file. The LAN URL is
+  `http://<first private IPv4>:<port>/` (or `--announce-lan-url`), so a new
+  DHCP address shows up within a minute.
+- **"On this network"**: the viewer's public address (CF-Connecting-IP via
+  X-Real-IP, trusted from loopback only) equals the hub's public IPv4, or
+  shares its IPv6 /64. The list is behind the login, so neighbours behind
+  the same CGNAT address see nothing.
+- In memory only: online while heard from within 3 min; forgotten after 7
+  days; a directory restart empties the list for a minute.
+- Limits: plain `http://` to the hub (no secure context: no mic in the
+  browser); hubs elsewhere are listed but their links work only on their
+  own network (the relay is the later step).
+
 ## Security baseline (done 2026-11-02)
 
 Both home routers pass incoming IPv6, and the hubs answered from the

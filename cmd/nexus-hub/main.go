@@ -49,6 +49,13 @@ func main() {
 	cacheDir := flag.String("cache-dir", filepath.Join(home, ".cache", "nexus-hub", "music"), "songs kept for the players")
 	cacheMB := flag.Int("cache-max-mb", 2048, "music cache size (0 = no cache)")
 	btAPI := flag.String("bluetooth-api", "", "Orbit's Bluetooth API to offer the dashboard at /hub/bluetooth (e.g. http://127.0.0.1:8390; empty = none)")
+	directory := flag.Bool("directory", false,
+		"serve the directory of home hubs at "+hub.DirectoryPath+" (public server; put a login in front of it)")
+	announceURL := flag.String("announce-url", "", "a directory to announce this hub to every minute (e.g. https://hub.wiztex.in; empty = none)")
+	announceTokenFile := flag.String("announce-token-file", filepath.Join(home, ".config", "nexus", "announce_token"),
+		"a hub token of the directory's hub")
+	announceLAN := flag.String("announce-lan-url", "", "this hub's LAN address to announce (default: http://<first LAN IPv4>:<port>/)")
+	hubName := flag.String("name", "", "this hub's name in the directory (default: the host name)")
 	debug := flag.Bool("debug", false, "debug logging")
 	flag.Parse()
 
@@ -158,7 +165,8 @@ func main() {
 		}
 	}
 	h := hub.New(hub.Config{Version: version, Tokens: tokens, WebDir: *webDir, Log: log,
-		GeminiKey: geminiKey, Uplink: *uplink, MCP: mcp, Tracks: tracks, Cache: cache, BluetoothAPI: bt})
+		GeminiKey: geminiKey, Uplink: *uplink, MCP: mcp, Tracks: tracks, Cache: cache, BluetoothAPI: bt,
+		Directory: *directory})
 	srv := &http.Server{Addr: *listen, Handler: h.Handler(), ReadHeaderTimeout: 10 * time.Second}
 
 	ln, err := net.Listen("tcp", *listen)
@@ -192,6 +200,38 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	if *announceURL != "" {
+		if u, err := url.Parse(*announceURL); err != nil || u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") {
+			log.Error("Bad --announce-url", "url", *announceURL)
+			os.Exit(1)
+		}
+		if readSecret(*announceTokenFile) == "" {
+			log.Error("No announce token", "file", *announceTokenFile)
+			os.Exit(1)
+		}
+		name := *hubName
+		if name == "" {
+			name, _ = os.Hostname()
+		}
+		a := &hub.Announcer{
+			URL:     *announceURL,
+			Token:   func() string { return readSecret(*announceTokenFile) },
+			Name:    name,
+			Version: version,
+			Log:     log,
+			LANURL: func() string {
+				if *announceLAN != "" {
+					return *announceLAN
+				}
+				if ip := lanIPv4(*mdnsIface); ip != nil {
+					return fmt.Sprintf("http://%s/", net.JoinHostPort(ip.String(), fmt.Sprint(port)))
+				}
+				return ""
+			},
+		}
+		go a.Run(ctx)
+	}
 	go func() {
 		<-ctx.Done()
 		sctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -293,6 +333,19 @@ func lanInterfaces(named string) []net.Interface {
 		}
 	}
 	return out
+}
+
+// lanIPv4 is the first private IPv4 address on the LAN interfaces.
+func lanIPv4(named string) net.IP {
+	for _, ifc := range lanInterfaces(named) {
+		addrs, _ := ifc.Addrs()
+		for _, a := range addrs {
+			if ipn, ok := a.(*net.IPNet); ok && ipn.IP.To4() != nil && ipn.IP.IsPrivate() {
+				return ipn.IP.To4()
+			}
+		}
+	}
+	return nil
 }
 
 func trackSourceName(t hub.TrackSource) string {

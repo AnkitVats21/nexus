@@ -1,0 +1,27 @@
+# The directory of home hubs, on the public server, next to the pilot hub.
+# The same nexus-hub binary, with only --directory: the page at
+# /hub/directory (behind nginx basic auth) and /hub/directory/announce
+# (home hubs, with a token from /etc/nexus-directory/tokens).
+# nginx: packaging/nginx/hub-directory.conf.
+[Unit]
+Description=Nexus hub directory
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nexus
+Group=nexus
+ExecStart=/opt/nexus-directory/nexus-hub --listen=127.0.0.1:8381 --directory \
+  --token-file=/etc/nexus-directory/tokens \
+  --mdns=false --music=false --local-tools=false --gemini-key-file=/nonexistent
+Restart=always
+RestartSec=5s
+MemoryMax=64M
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

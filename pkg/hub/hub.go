@@ -82,6 +82,9 @@ type Config struct {
 	// Orbit's Bluetooth API on this machine (cmd/orbit --bluetooth-api),
 	// served to the dashboard at /hub/bluetooth; nil = none.
 	BluetoothAPI *url.URL
+	// Serve the directory of home hubs (directory.go): the page at
+	// DirectoryPath (put a login in front of it) and AnnouncePath.
+	Directory bool
 }
 
 type Hub struct {
@@ -96,6 +99,7 @@ type Hub struct {
 
 	music *Music
 	bt    *Bluetooth // the bluetooth voice tool; nil without BluetoothAPI
+	dir   *directory // nil without Config.Directory
 
 	transcript *Transcript
 	voices     map[string]*voiceSession // by board id
@@ -187,6 +191,9 @@ func New(cfg Config) *Hub {
 	if cfg.BluetoothAPI != nil {
 		h.bt = newBluetooth(cfg.BluetoothAPI)
 	}
+	if cfg.Directory {
+		h.dir = newDirectory(h.tokenOK)
+	}
 	return h
 }
 
@@ -197,6 +204,10 @@ func (h *Hub) Handler() http.Handler {
 	mux.HandleFunc(EdgePath, h.serveEdge)
 	mux.HandleFunc(BoardPath, h.serveEdge)
 	mux.HandleFunc("/hub/status", h.serveStatus)
+	if h.dir != nil {
+		mux.HandleFunc(DirectoryPath, h.dir.servePage)
+		mux.HandleFunc(AnnouncePath, h.dir.serveAnnounce)
+	}
 	if h.cfg.BluetoothAPI != nil {
 		// /hub/bluetooth[/...] -> <api>/bluetooth[/...]
 		bt := &httputil.ReverseProxy{
