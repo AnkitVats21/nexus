@@ -256,6 +256,7 @@ type musicAction struct {
 	Mode       string `json:"mode"`
 	On         bool   `json:"on"`
 	Target     string `json:"target"`
+	Delta      int    `json:"delta"`
 }
 
 func (m *Music) action(from *edge, a musicAction) {
@@ -279,6 +280,8 @@ func (m *Music) action(from *edge, a musicAction) {
 		m.edit(a)
 	case "output":
 		_, err = m.selectOutput(from, a.Target)
+	case "volume":
+		err = m.stepVolume(from, a.Target, a.Delta)
 	default:
 		err = fmt.Errorf("unknown action %q", a.Action)
 	}
@@ -1117,6 +1120,38 @@ func (m *Music) setVolume(target string, vol int) error {
 	}
 	m.log.Info("Speaker volume", "player", to.id, "volume", vol)
 	m.sendTo(to, map[string]any{"type": "music_volume", "volume": max(0, min(100, vol))})
+	return nil
+}
+
+// stepVolume moves a hub speaker's volume by delta (the board's volume keys
+// aimed at a speaker). The new level is kept at once, so quick presses add
+// up before the player answers with volume_state. Actions run concurrently:
+// the level is sent under the lock (sendTo doesn't block), so the speaker
+// gets them in order.
+func (m *Music) stepVolume(from *edge, target string, delta int) error {
+	m.mu.Lock()
+	to := m.matchPlayerLocked(from, target)
+	m.mu.Unlock()
+	if to == nil {
+		return fmt.Errorf("no speaker matches %q", target)
+	}
+	m.h.mu.Lock()
+	if to == from || to == m.h.board {
+		m.h.mu.Unlock()
+		return errors.New("the board's volume is set on the board")
+	}
+	if to.volume < 0 {
+		m.h.mu.Unlock()
+		return fmt.Errorf("%s hasn't reported its volume", to.id)
+	}
+	to.volume = max(0, min(100, to.volume+delta))
+	vol := to.volume
+	m.sendTo(to, map[string]any{"type": "music_volume", "volume": vol})
+	m.h.mu.Unlock()
+	m.log.Info("Speaker volume step", "player", to.id, "delta", delta, "volume", vol)
+	m.mu.Lock()
+	m.broadcastLocked()
+	m.mu.Unlock()
 	return nil
 }
 

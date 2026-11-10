@@ -205,6 +205,7 @@ Controller to hub, `music_action`:
 | `repeat` | `mode`: `off`, `one`, `all` |
 | `autoplay` | `on` |
 | `output` | `target`: a player's id or name (a name may be partial) |
+| `volume` | `target`: a player's id or name, `delta`: a step for its level (from its last `volume_state`, clamped 0-100; the hub sends `music_volume`) |
 
 Hub to controllers, `music_state` on every change:
 
