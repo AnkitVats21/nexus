@@ -127,9 +127,16 @@ func main() {
 			slog.Info("Running in STANDALONE mode (Nexus Core connection disabled)")
 		}
 		coord = coordinator.NewCoordinator(cfg, trans, res, player)
-		// A Bluetooth speaker's own volume (remembered per speaker), when
-		// PipeWire is there; else the player's.
-		if sv := (audio.SinkVolume{}); cfg.HubURL != "" && cfg.RequireBluetooth && sv.Available() {
+		// A Bluetooth speaker's own volume (remembered per speaker): through
+		// PipeWire when it is there, else bluez-alsa's mixer for the native
+		// player on bluealsa (the Pi); else the player's.
+		var sv audio.Volume
+		if pw := (audio.SinkVolume{}); pw.Available() {
+			sv = pw
+		} else if av := (audio.ALSAVolume{}); cfg.Player == "native" && strings.HasPrefix(cfg.AudioDevice, "bluealsa") && av.Available() {
+			sv = av
+		}
+		if cfg.HubURL != "" && cfg.RequireBluetooth && sv != nil {
 			speakerMu.Lock()
 			mac := speaker.MAC
 			speakerMu.Unlock()
@@ -138,6 +145,7 @@ func main() {
 			vctx, endVolume = context.WithCancel(ctx)
 			rv.Begin(vctx)
 			coord.SetVolumeControl(rv)
+			slog.Info("Speaker volume control", "via", fmt.Sprintf("%T", sv))
 		}
 		if err := coord.Start(); err != nil {
 			slog.Error("Failed to start coordinator", "err", err)
