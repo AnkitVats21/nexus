@@ -761,6 +761,50 @@ func musicToolDeclarations() []map[string]any {
 	}
 }
 
+// volumeToolName is the board's own volume tool. With the hub running the
+// music, the hub declares it instead, with a target, and sets a hub
+// speaker's volume itself; a call for the board goes on to the board.
+const volumeToolName = "volume"
+
+func volumeToolDeclaration() map[string]any {
+	return map[string]any{"name": volumeToolName,
+		"description": "Sets a speaker's volume, 0-100 (0 mutes). Without a target it sets the volume where the music plays now (a Bluetooth speaker, a PC), or this device's when the music plays here or nothing plays. For 'louder' or 'quieter', music_status gives the current level.",
+		"parameters": map[string]any{"type": "OBJECT", "required": []string{"level"}, "properties": map[string]any{
+			"level":  map[string]any{"type": "INTEGER", "description": "Volume 0-100."},
+			"target": map[string]any{"type": "STRING", "description": "'here' for this device, or a speaker's name; omit for where the music plays."}}}}
+}
+
+// volumeTarget is the speaker a volume call from edge from is for; nil
+// means from itself (the board sets its own volume).
+func (m *Music) volumeTarget(from *edge, target string) (*edge, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var to *edge
+	if strings.TrimSpace(target) == "" {
+		if m.cur != nil && m.state != "idle" {
+			to = m.edgeLocked(m.output)
+		}
+	} else if to = m.matchPlayerLocked(from, target); to == nil {
+		return nil, fmt.Errorf("no speaker by that name; the speakers are: %s",
+			strings.Join(m.playerNamesLocked(), ", "))
+	}
+	m.h.mu.Lock()
+	board := m.h.board
+	m.h.mu.Unlock()
+	if to == nil || to == from || to == board {
+		return nil, nil
+	}
+	return to, nil
+}
+
+// volumeTool sets a hub speaker's volume.
+func (m *Music) volumeTool(to *edge, level int) json.RawMessage {
+	level = max(0, min(100, level))
+	m.log.Info("Speaker volume", "player", to.id, "volume", level)
+	m.sendTo(to, map[string]any{"type": "music_volume", "volume": level})
+	return mustJSON(map[string]any{"status": "success", "speaker": to.name, "volume": level})
+}
+
 // toolCall runs one of the music tools for a voice session on edge from.
 func (m *Music) toolCall(from *edge, name string, args json.RawMessage) json.RawMessage {
 	var a struct {
@@ -853,6 +897,11 @@ func (m *Music) statusTool() json.RawMessage {
 		}
 		if out := m.edgeLocked(m.output); out != nil {
 			res["on"] = out.name
+			m.h.mu.Lock()
+			if out != m.h.board && out.volume >= 0 {
+				res["speaker_volume"] = out.volume
+			}
+			m.h.mu.Unlock()
 		}
 	}
 	next := []string{}

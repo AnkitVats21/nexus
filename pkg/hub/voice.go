@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"strings"
 	"sync"
@@ -457,6 +458,13 @@ func (v *voiceSession) buildSetupLocked() ([]byte, *geminiConn) {
 		for _, d := range musicToolDeclarations() {
 			decls = append(decls, d)
 		}
+		kept = decls[:0]
+		for _, d := range decls {
+			if dm, _ := d.(map[string]any); dm == nil || dm["name"] != volumeToolName {
+				kept = append(kept, d)
+			}
+		}
+		decls = append(kept, volumeToolDeclaration())
 	}
 	if v.btTool {
 		kept := decls[:0]
@@ -656,6 +664,10 @@ func (v *voiceSession) onGemini(gc *geminiConn, data []byte) {
 			if v.musicTools && musicToolNames[fc.Name] {
 				v.sendBoardLocked(map[string]any{"type": "reply_owed", "name": fc.Name, "kind": "music"})
 				go v.callMusic(gc, fc.ID, fc.Name, fc.Args)
+				continue
+			}
+			if v.musicTools && fc.Name == volumeToolName {
+				v.callVolumeLocked(gc, fc.ID, fc.Args)
 				continue
 			}
 			if v.btTool && fc.Name == bluetoothToolName {
@@ -886,6 +898,49 @@ func (v *voiceSession) callMusic(gc *geminiConn, id, name string, args json.RawM
 		v.mu.Unlock()
 	}
 	v.sendToolResponse(gc, id, res)
+}
+
+// callVolumeLocked runs the volume tool: a hub speaker's volume the hub
+// sets; the board's own goes on to the board's volume tool, as before. What
+// goes to the board (reply_owed, tool_call) goes now, in order with what
+// Gemini sends next: a reply_owed after the answer has started leaves the
+// board waiting for another answer.
+func (v *voiceSession) callVolumeLocked(gc *geminiConn, id string, args json.RawMessage) {
+	var a struct {
+		Level  *float64 `json:"level"`
+		Target string   `json:"target"`
+	}
+	json.Unmarshal(args, &a)
+	if a.Level == nil {
+		go v.sendToolResponse(gc, id, toolError("level is required"))
+		return
+	}
+	level := int(math.Round(*a.Level))
+	to, err := v.h.music.volumeTarget(v.b, a.Target)
+	switch {
+	case err != nil:
+		go v.sendToolResponse(gc, id, toolError(err.Error()))
+	case to != nil:
+		v.sendBoardLocked(map[string]any{"type": "reply_owed", "name": volumeToolName, "kind": "music"})
+		go func() {
+			res := v.h.music.volumeTool(to, level)
+			v.log.Info("Volume tool", "speaker", to.id, "result", string(res))
+			// A music command, as play and music_output: the session ends
+			// once the reply has played (the mic hears the music).
+			v.mu.Lock()
+			if v.active && !v.endSent {
+				v.endSent = true
+				v.sendBoardLocked(map[string]any{"type": "end_after_reply"})
+			}
+			v.mu.Unlock()
+			v.sendToolResponse(gc, id, res)
+		}()
+	case v.boardTools[volumeToolName]:
+		v.sendBoardLocked(map[string]any{"type": "tool_call", "id": id, "name": volumeToolName,
+			"args": map[string]any{"level": level}})
+	default:
+		go v.sendToolResponse(gc, id, toolError("this device's volume can't be set by voice"))
+	}
 }
 
 func (v *voiceSession) sendBoard(msg any) {

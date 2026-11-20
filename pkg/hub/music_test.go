@@ -287,7 +287,7 @@ func TestMusicVoiceTool(t *testing.T) {
 			t.Fatalf("the board's play declaration was kept")
 		}
 	}
-	if strings.Join(names, ",") != "set_volume,play,playback,music_output,music_status" {
+	if strings.Join(names, ",") != "set_volume,play,playback,music_output,music_status,volume" {
 		t.Fatalf("declarations: %v", names)
 	}
 	var answered bool
@@ -558,6 +558,62 @@ func TestMusicMoveWhileLoadingKeepsPlace(t *testing.T) {
 	orbit = connectEdge(t, ctx, srv.URL, "workstation", orbitRoles)
 	if p := orbit.next(ctx, "music_play"); p["position_ms"] != float64(40000) {
 		t.Fatalf("back on the speaker: %v", p)
+	}
+}
+
+// The volume tool: the board's own volume unless the music plays on
+// another speaker, or a speaker is named.
+func TestMusicVolumeTarget(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	h := New(Config{Version: "test", Tokens: []string{testToken}, Tracks: &fakeTracks{}})
+	srv := httptest.NewServer(h.Handler())
+	t.Cleanup(srv.Close)
+	board := connectEdge(t, ctx, srv.URL, "board", boardRoles)
+	orbit := connectEdge(t, ctx, srv.URL, "workstation", orbitRoles)
+	time.Sleep(30 * time.Millisecond)
+	h.music.mu.Lock()
+	from := h.music.edgeLocked("board")
+	h.music.mu.Unlock()
+	target := func(name string) string {
+		t.Helper()
+		to, err := h.music.volumeTarget(from, name)
+		if err != nil {
+			t.Fatalf("%q: %v", name, err)
+		}
+		if to == nil {
+			return "board"
+		}
+		return to.id
+	}
+	if got := target(""); got != "board" {
+		t.Fatalf("nothing playing: %s", got)
+	}
+	if got := target("workstation"); got != "workstation" {
+		t.Fatalf("named: %s", got)
+	}
+
+	write(t, ctx, board.conn, map[string]any{"type": "music_action", "action": "play", "query": "alpha"})
+	time.Sleep(50 * time.Millisecond)
+	if got := target(""); got != "board" {
+		t.Fatalf("playing here: %s", got)
+	}
+	h.music.toolCall(from, "music_output", json.RawMessage(`{"target":"workstation"}`))
+	if got := target(""); got != "workstation" {
+		t.Fatalf("playing on the speaker: %s", got)
+	}
+	if got := target("here"); got != "board" {
+		t.Fatalf("here: %s", got)
+	}
+
+	to, _ := h.music.volumeTarget(from, "")
+	var res map[string]any
+	json.Unmarshal(h.music.volumeTool(to, 130), &res)
+	if res["status"] != "success" || res["volume"] != float64(100) {
+		t.Fatalf("result %v", res)
+	}
+	if v := orbit.next(ctx, "music_volume"); v["volume"] != float64(100) {
+		t.Fatalf("speaker got %v", v)
 	}
 }
 
