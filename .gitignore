@@ -40,3 +40,6 @@ Thumbs.db
 .vscode/
 *.swp
 *~
+
+# Wrangler (Cloudflare) local cache: account details
+.cloudflare/
