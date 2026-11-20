@@ -395,10 +395,25 @@ func TestMusicCache(t *testing.T) {
 	if resp.StatusCode != http.StatusPartialContent || len(body) != 1000 || body[0] != song[1000] {
 		t.Fatalf("range: %d, %d bytes", resp.StatusCode, len(body))
 	}
+	// The dashboard's list of what the hub keeps.
+	lr, err := http.Get(srv.URL + "/hub/cache")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var list CacheList
+	json.NewDecoder(lr.Body).Decode(&list)
+	lr.Body.Close()
+	var sum int64
+	for _, n := range list.Songs {
+		sum += n
+	}
+	if !list.Enabled || list.Songs["a"] != int64(len(song)) || list.UsedBytes != sum || list.MaxBytes != 10<<20 || list.MaxDurS != 20*60 {
+		t.Fatalf("/hub/cache: %+v", list)
+	}
 	// Over the size: the least recently used goes.
 	small, _ := NewMusicCache(t.TempDir(), 250<<10, nil)
 	for _, id := range []string{"x1", "x2", "x3"} {
-		small.Fetch(id, cdn.URL+"/"+id)
+		small.Fetch(id, cdn.URL+"/"+id, 200)
 		for !small.Has(id) {
 			if ctx.Err() != nil {
 				t.Fatalf("%s was never cached", id)
@@ -543,5 +558,32 @@ func TestMusicMoveWhileLoadingKeepsPlace(t *testing.T) {
 	orbit = connectEdge(t, ctx, srv.URL, "workstation", orbitRoles)
 	if p := orbit.next(ctx, "music_play"); p["position_ms"] != float64(40000) {
 		t.Fatalf("back on the speaker: %v", p)
+	}
+}
+
+// Songs over twenty minutes, or of unknown length, are not cached; twenty
+// minutes exactly is.
+func TestMusicCacheSkipsLongSongs(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	song := make([]byte, 64<<10)
+	var hits atomic.Int32
+	cdn := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Write(song)
+	}))
+	t.Cleanup(cdn.Close)
+	cache, _ := NewMusicCache(t.TempDir(), 10<<20, nil)
+	cache.Fetch("long", cdn.URL+"/long", 20*60+1)
+	cache.Fetch("unknown", cdn.URL+"/unknown", 0)
+	cache.Fetch("max", cdn.URL+"/max", 20*60)
+	for !cache.Has("max") {
+		if ctx.Err() != nil {
+			t.Fatal("a twenty-minute song was never cached")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if cache.Has("long") || cache.Has("unknown") || hits.Load() != 1 {
+		t.Fatalf("long or unknown-length song fetched (%d downloads)", hits.Load())
 	}
 }

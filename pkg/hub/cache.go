@@ -2,6 +2,7 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -26,6 +27,9 @@ const (
 	CachePath           = "/hub/cache/"
 	cacheDownloadTimout = 10 * time.Minute
 	cacheMinBytes       = 32 << 10 // smaller: a broken download (the board's rule too)
+	// Longer songs (mixes, podcasts) would fill the cache; an unknown length
+	// counts as long, as on the board (NexusPlayer MAX_CACHE_DURATION_MS).
+	cacheMaxDuration = 20 * time.Minute
 )
 
 var cacheID = regexp.MustCompile(`^[A-Za-z0-9_-]{1,32}$`) // YouTube ids are 11; no path characters
@@ -80,10 +84,15 @@ func (c *MusicCache) URL(base, id string) string {
 	return base + CachePath + id + ".webm"
 }
 
-// Fetch saves the song from its stream URL in the background, unless it is
-// saved or on its way.
-func (c *MusicCache) Fetch(id, streamURL string) {
+// Fetch saves the song (durationS long) from its stream URL in the
+// background, unless it is saved or on its way, or its length is unknown or
+// over cacheMaxDuration.
+func (c *MusicCache) Fetch(id, streamURL string, durationS int) {
 	if c == nil || !cacheID.MatchString(id) || streamURL == "" || c.Has(id) {
+		return
+	}
+	if d := time.Duration(durationS) * time.Second; d <= 0 || d > cacheMaxDuration {
+		c.log.Info("Not caching: length unknown or over the limit", "id", id, "s", durationS, "max_s", int(cacheMaxDuration.Seconds()))
 		return
 	}
 	c.mu.Lock()
@@ -191,6 +200,46 @@ func (c *MusicCache) evict() {
 			c.log.Info("Evicted", "file", filepath.Base(f.path), "kb", f.size>>10)
 		}
 	}
+}
+
+// CacheList is what GET /hub/cache answers: the songs kept (id: bytes) and
+// the space used and allowed.
+type CacheList struct {
+	Enabled   bool             `json:"enabled"`
+	MaxBytes  int64            `json:"max_bytes"`
+	UsedBytes int64            `json:"used_bytes"`
+	MaxDurS   int              `json:"max_duration_s"`
+	Songs     map[string]int64 `json:"songs"`
+}
+
+// List returns the songs kept (a nil cache: not enabled).
+func (c *MusicCache) List() CacheList {
+	l := CacheList{Songs: map[string]int64{}}
+	if c == nil {
+		return l
+	}
+	l.Enabled, l.MaxBytes, l.MaxDurS = true, c.max, int(cacheMaxDuration.Seconds())
+	entries, _ := os.ReadDir(c.dir)
+	for _, e := range entries {
+		id, ok := strings.CutSuffix(e.Name(), ".webm")
+		if !ok || !cacheID.MatchString(id) {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil || info.Size() < cacheMinBytes {
+			continue
+		}
+		l.Songs[id] = info.Size()
+		l.UsedBytes += info.Size()
+	}
+	return l
+}
+
+// ServeList serves GET /hub/cache: List as JSON.
+func (c *MusicCache) ServeList(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	json.NewEncoder(w).Encode(c.List())
 }
 
 // ServeHTTP serves /hub/cache/<id>.webm (Range requests too: seeking).

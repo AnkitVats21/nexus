@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -310,7 +311,7 @@ func (m *Music) play(ctx context.Context, from *edge, id, query string, cached b
 	needURL := m.needsURL(out) && !(cached && out == from) && !m.h.cfg.Cache.Has(id)
 	info, err := m.src.Lookup(ctx, id, query, needURL, musicRecs)
 	if err == nil {
-		m.h.cfg.Cache.Fetch(info.ID, info.URL)
+		m.h.cfg.Cache.Fetch(info.ID, info.URL, info.Duration)
 	}
 
 	m.mu.Lock()
@@ -912,7 +913,7 @@ func (m *Music) startAtLocked(out *edge, t Track, posMs int64, paused bool) {
 					m.nextLocked(true)
 					return
 				}
-				m.h.cfg.Cache.Fetch(t.ID, info.URL)
+				m.h.cfg.Cache.Fetch(t.ID, info.URL, cmp.Or(info.Duration, t.Duration))
 				m.startLocked(t, info.URL, posMs, paused)
 				m.afterChangeLocked()
 			}()
@@ -1045,7 +1046,7 @@ func (m *Music) prefetchLocked() {
 		delete(m.fetching, id)
 		if err == nil {
 			m.urls[id] = urlEntry{info.URL, time.Now()}
-			m.h.cfg.Cache.Fetch(id, info.URL)
+			m.h.cfg.Cache.Fetch(id, info.URL, info.Duration)
 		}
 	}()
 }

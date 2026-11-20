@@ -232,6 +232,9 @@ func (h *Hub) Handler() http.Handler {
 	if h.cfg.Cache != nil {
 		mux.Handle(CachePath, h.cfg.Cache)
 	}
+	// The songs the hub keeps, for the dashboard ({"enabled": false} without
+	// a cache).
+	mux.HandleFunc("GET /hub/cache", h.cfg.Cache.ServeList)
 	mux.HandleFunc("/api/ws", h.serveBrowser)
 	mux.HandleFunc("/api/", h.serveAPI)
 	mux.HandleFunc("/", h.serveWeb)
