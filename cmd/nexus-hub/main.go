@@ -30,7 +30,7 @@ func main() {
 	listen := flag.String("listen", ":8380", "address to listen on")
 	tokenFile := flag.String("token-file", filepath.Join(home, ".config", "nexus", "hub_tokens"),
 		"board tokens, one per line (the board's hub token must be one of them)")
-	webDir := flag.String("web", "", "dashboard build to serve (waveshare-dashboard: npm run build -- --mode device, then dist/)")
+	webDir := flag.String("web", "", "dashboard build to serve (nexus-dashboard: npm run build -- --mode device, then dist/)")
 	mdns := flag.Bool("mdns", true, "advertise _nexus-hub._tcp so boards find the hub")
 	mdnsIface := flag.String("mdns-iface", "", "interfaces to advertise on, comma-separated (default: the LAN ones)")
 	geminiKeyFile := flag.String("gemini-key-file", filepath.Join(home, ".config", "nexus", "gemini_key"),

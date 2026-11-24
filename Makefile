@@ -10,8 +10,8 @@ build:
 	go build -o $(BINARY_NAME) ./cmd/orbit
 
 # The board's hub (pkg/hub). WEB: the dashboard's device build
-# (waveshare-dashboard: npx vite build --mode device).
-WEB ?= ../waveshare-dashboard/dist
+# (nexus-dashboard: npx vite build --mode device).
+WEB ?= ../nexus-dashboard/dist
 
 build-hub:
 	@mkdir -p bin

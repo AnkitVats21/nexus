@@ -291,7 +291,7 @@ phase 1 is the link and the dashboard, phase 2 voice sessions:
 |---|---|---|
 | `--listen` | `:8380` | Address to listen on |
 | `--token-file` | `~/.config/nexus/hub_tokens` | Board tokens, one per line (mode 600). The board gets the same token with `POST /api/hub {"token": ...}` |
-| `--web` | none | Dashboard build folder (`waveshare-dashboard`: `npx vite build --mode device`, then `dist`) |
+| `--web` | none | Dashboard build folder (`nexus-dashboard`: `npx vite build --mode device`, then `dist`) |
 | `--mdns` | `true` | Advertise `_nexus-hub._tcp` |
 | `--mdns-iface` | LAN interfaces | Interfaces to advertise on, comma-separated |
 | `--gemini-key-file` | `~/.config/nexus/gemini_key` | Gemini API key (first line); missing = no voice through the hub |
@@ -306,5 +306,5 @@ phase 1 is the link and the dashboard, phase 2 voice sessions:
 | `--cache-dir` | `~/.cache/nexus-hub/music` | Songs kept for the players, served at `/hub/cache/<id>.webm` |
 | `--cache-max-mb` | 2048 | Music cache size; the least recently played go first (0 = no cache) |
 
-`make run-hub` builds it and serves `../waveshare-dashboard/dist`;
+`make run-hub` builds it and serves `../nexus-dashboard/dist`;
 `make build-hub-pi` builds it for a 64-bit Pi.
