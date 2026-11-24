@@ -6,8 +6,8 @@ import (
 	"net/http"
 	"strings"
 
-	"nexus/pkg/tools"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"nexus/pkg/tools"
 )
 
 // ServerConfig configures the MCP server and HTTP transport.
@@ -18,6 +18,9 @@ type ServerConfig struct {
 	WeatherService *tools.WeatherService
 	SearchService  *tools.SearchService
 	MusicService   *tools.MusicService
+	// Lights are the names of the home hub's smart bulbs ("work room
+	// light"): declared here so the board lists them, run by the hub.
+	Lights []string
 }
 
 // AuthMiddleware enforces Bearer token authentication using constant-time comparison.
@@ -44,7 +47,12 @@ func BuildMCPServer(cfg ServerConfig) (*mcp.Server, error) {
 		Version: "1.0.0",
 	}, nil)
 
-	tools.NewRegistry(cfg.NewsService, cfg.WeatherService, cfg.SearchService, cfg.MusicService).Register(server)
+	reg := tools.NewRegistry(cfg.NewsService, cfg.WeatherService, cfg.SearchService, cfg.MusicService)
+	// Lights: declared here, run by the home hub (no address or key here).
+	for _, name := range cfg.Lights {
+		reg.AddLight(tools.LightConfig{Name: name})
+	}
+	reg.Register(server)
 
 	return server, nil
 }

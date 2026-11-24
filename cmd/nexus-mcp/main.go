@@ -45,6 +45,14 @@ func main() {
 	// Resolving a stream runs yt-dlp behind the API: 10 s measured cold.
 	musicSvc := tools.NewMusicService(&http.Client{Timeout: 25 * time.Second}, musicURL)
 
+	// NEXUS_MCP_LIGHTS: the hub's lights by name, comma-separated.
+	var lights []string
+	for _, n := range strings.Split(os.Getenv("NEXUS_MCP_LIGHTS"), ",") {
+		if n = strings.TrimSpace(n); n != "" {
+			lights = append(lights, n)
+		}
+	}
+
 	cfg := ServerConfig{
 		Token:          token,
 		Addr:           addr,
@@ -52,6 +60,7 @@ func main() {
 		WeatherService: weatherSvc,
 		SearchService:  searchSvc,
 		MusicService:   musicSvc,
+		Lights:         lights,
 	}
 
 	handler, _, err := NewHTTPHandler(cfg)

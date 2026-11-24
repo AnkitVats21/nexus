@@ -138,3 +138,42 @@ func TestRegistryBadArguments(t *testing.T) {
 		t.Fatal("want an error for a wrong argument type")
 	}
 }
+
+// A light is declared here and run by the home hub: the server lists it and,
+// called itself, says the hub runs it.
+func TestServerDeclaresHubLight(t *testing.T) {
+	server, err := BuildMCPServer(ServerConfig{Lights: []string{"work room light"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ct, st := mcp.NewInMemoryTransports()
+	ctx := context.Background()
+	if _, err := server.Connect(ctx, st, nil); err != nil {
+		t.Fatal(err)
+	}
+	cs, err := mcp.NewClient(&mcp.Implementation{Name: "t"}, nil).Connect(ctx, ct, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cs.Close()
+	list, err := cs.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, tl := range list.Tools {
+		if tl.Name == "work_room_light" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("work_room_light not listed")
+	}
+	res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "work_room_light", Arguments: map[string]any{"power": "on"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.IsError || len(res.Content) == 0 || res.Content[0].(*mcp.TextContent).Text != "The work room light is controlled by the home hub, which is not connected right now." {
+		t.Fatalf("call here: %+v", res)
+	}
+}

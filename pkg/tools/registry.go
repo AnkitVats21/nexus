@@ -32,6 +32,9 @@ type Config struct {
 	// MusicClient serves the music API; nil = 25 s timeout (resolving a
 	// stream runs yt-dlp behind the API: 10 s measured cold).
 	MusicClient *http.Client
+	// Lights are the smart bulbs on the LAN, one tool each (named after the
+	// light: "work room light" is work_room_light); none = no light tool.
+	Lights []LightConfig
 }
 
 // Result is a tool call's outcome, as the MCP server returns it.
@@ -127,12 +130,30 @@ func NewDefaultRegistry(cfg Config) *Registry {
 	if musicClient == nil {
 		musicClient = &http.Client{Timeout: 25 * time.Second}
 	}
-	return NewRegistry(
+	r := NewRegistry(
 		NewNewsService(cfg.HTTPClient),
 		NewWeatherService(cfg.HTTPClient),
 		NewSearchService(cfg.HTTPClient, cfg.GeminiAPIKey, cfg.GeminiKeyFile),
 		NewMusicService(musicClient, cfg.MusicURL),
 	)
+	for _, l := range cfg.Lights {
+		r.AddLight(l)
+	}
+	return r
+}
+
+// AddLight adds the tool for one smart bulb.
+func (r *Registry) AddLight(cfg LightConfig) {
+	s := NewLightService(cfg)
+	addTool(r, LightToolName(s.cfg.Name),
+		fmt.Sprintf("Control the %s: turn it on, off or toggle, set brightness, warm/cool white, or a colour. With no arguments, say whether it is on and how it is set.", s.cfg.Name),
+		false, s.Handler())
+}
+
+// LightToolName is the tool name for a light's name: "Work room light" is
+// work_room_light.
+func LightToolName(name string) string {
+	return strings.Join(strings.Fields(strings.ToLower(name)), "_")
 }
 
 type handlerFunc[P any] func(context.Context, *mcp.CallToolRequest, *P) (*mcp.CallToolResult, any, error)

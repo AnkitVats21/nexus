@@ -4,6 +4,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -41,6 +42,8 @@ func main() {
 	mcpMaxTools := flag.Int("mcp-max-tools", hub.DefaultMCPMaxTools, "most MCP tools offered to Gemini")
 	localTools := flag.Bool("local-tools", true,
 		"run nexus-mcp's tools (news, weather, web search, music lookups) in this process; the MCP server serves only the tools not run here")
+	lightFile := flag.String("light-file", filepath.Join(home, ".config", "nexus", "work_room_light.json"),
+		"smart bulbs for the local tools: {\"name\",\"id\",\"ip\",\"key\"} or a list of them, the key the bulb's Tuya local key (missing: no light tool)")
 	musicAPI := flag.String("music-api", os.Getenv("NEXUS_MCP_MUSIC_API"),
 		"Invidious-compatible API for the local music tools (default $NEXUS_MCP_MUSIC_API, else --invidious-url; none: music lookups go to MCP)")
 	music := flag.Bool("music", true, "run the music (queue, lookups, outputs) for the edges")
@@ -108,7 +111,11 @@ func main() {
 		if musicURL == "" {
 			musicURL = *invidiousURL
 		}
-		reg := tools.NewDefaultRegistry(tools.Config{GeminiKeyFile: *geminiKeyFile, MusicURL: musicURL})
+		lights, err := readLights(*lightFile)
+		if err != nil {
+			log.Warn("No light tool: bad light file", "file", *lightFile, "err", err)
+		}
+		reg := tools.NewDefaultRegistry(tools.Config{GeminiKeyFile: *geminiKeyFile, MusicURL: musicURL, Lights: lights})
 		local = hub.NewLocalTools(reg, log, localSkip(geminiKey != "", musicURL != "")...)
 		log.Info("Local tools", "names", hub.JoinNames(local.Names()))
 	}
@@ -258,6 +265,35 @@ func localSkip(haveGeminiKey, haveMusicAPI bool) []string {
 		skip = append(skip, "music_search", "music_track")
 	}
 	return skip
+}
+
+// readLights reads the light file: one light or a list. A missing file is no
+// lights and no error.
+func readLights(path string) ([]tools.LightConfig, error) {
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var list []tools.LightConfig
+	if strings.HasPrefix(strings.TrimSpace(string(data)), "[") {
+		err = json.Unmarshal(data, &list)
+	} else {
+		var one tools.LightConfig
+		err = json.Unmarshal(data, &one)
+		list = []tools.LightConfig{one}
+	}
+	if err != nil {
+		return nil, err
+	}
+	for _, l := range list {
+		if l.ID == "" || l.IP == "" || len(l.Key) != 16 {
+			return nil, fmt.Errorf("light %q: id, ip and a 16-character key are needed", l.Name)
+		}
+	}
+	return list, nil
 }
 
 // readSecret returns the first line of a file, "" if it can't be read.
